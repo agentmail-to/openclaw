@@ -18,6 +18,13 @@ describe("AgentMail mailbox authorization", () => {
       address: "sender@example.com",
       name: 'Sender "Example"',
     });
+    expect(parseSingleFromMailbox("<sender@example.com>")).toEqual({
+      address: "sender@example.com",
+    });
+    expect(parseSingleFromMailbox("Doe, John <john@example.com>")).toEqual({
+      address: "john@example.com",
+      name: "Doe, John",
+    });
   });
 
   it.each([
@@ -28,10 +35,9 @@ describe("AgentMail mailbox authorization", () => {
     "Sender <sender@example.com",
     "Sender sender@example.com>",
     "Sender <sender@example.com><other@example.com>",
-    "<sender@example.com>",
     "Sender <sender@example.com> trailing",
     "allowed@good.com <attacker@evil.com>",
-    "Sender, Example <sender@example.com>",
+    "Doe, John <john@example.com>, Other <other@example.com>",
     "sender@@example.com",
     "sender @example.com",
     ".sender@example.com",

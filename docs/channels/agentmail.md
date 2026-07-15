@@ -65,7 +65,7 @@ Webhook and WebSocket are configuration alternatives. The plugin does not switch
 
 ## Sender security
 
-`dmPolicy` defaults to `allowlist`. Missing or empty `allowFrom` denies every sender. Entries are exact mailbox addresses, normalized case-insensitively after authoritative REST hydration and RFC mailbox parsing.
+`dmPolicy` defaults to `allowlist`. Missing or empty `allowFrom` denies every sender. Entries are exact mailbox addresses, normalized case-insensitively after authoritative REST hydration and single-mailbox parsing.
 
 To intentionally accept every sender, configure both values explicitly:
 
@@ -90,9 +90,9 @@ Sessions are keyed by OpenClaw account, AgentMail inbox, and AgentMail thread ID
 
 ## Message bodies and attachments
 
-The REST-hydrated plain-text body is preferred. HTML-only mail is converted through OpenClaw's shared HTML-to-text helpers. Transport event bodies are never used as authoritative content.
+The REST-hydrated plain-text body is preferred. HTML-only mail is converted through OpenClaw's shared HTML-to-text helpers. When no body is available, the hydrated subject becomes the message. Transport event bodies are never used as authoritative content.
 
-Inbound attachment metadata is hydrated with AgentMail's positional API, and its short-lived `downloadUrl` is loaded through OpenClaw's bounded, SSRF-aware media path. Inline/CID parts are skipped. Per-file and aggregate limits use `mediaMaxMb` (default 20 MiB). All accepted attachments must download before the agent turn starts; a download failure dispatches nothing and leaves the durable event retryable, while a deterministic size-policy rejection is settled without repeated downloads.
+Inbound attachment metadata is hydrated with AgentMail's positional API, and its short-lived `downloadUrl` is loaded through OpenClaw's bounded, SSRF-aware media path. Inline/CID parts are skipped. Per-file and aggregate limits use `mediaMaxMb` (default 20 MiB). All accepted attachments must download before the agent turn starts; a transient download failure dispatches nothing and leaves the durable event retryable. A deterministic size-policy rejection omits the complete attachment set, adds an omission notice, and still dispatches the authoritative body or subject.
 
 Outbound text and attachments are normalized and loaded before one AgentMail reply request. Replies are not streamed or split into separate email messages.
 
@@ -104,7 +104,7 @@ Webhook and WebSocket events share a digest of account ID, inbox ID, and message
 
 The community `openclaw-agentmail` package was not suitable as the official implementation: it is WebSocket-only, treats an empty allowlist as open, replies to all recipients, has no durable SQLite ingress, and targets an older AgentMail/OpenClaw SDK generation. `openclaw-agentmail-listener` emits raw WebSocket system events and explicitly is not a channel. The official plugin therefore uses the current pinned AgentMail SDK and OpenClaw channel contracts instead of adopting either implementation.
 
-The pinned AgentMail SDK documents `from` as either `sender@example.com` or `Display Name <sender@example.com>`. The plugin parses only those forms with a small dependency-free, fail-closed parser. Lists, groups, control characters, quoted local parts, internationalized addresses, and malformed or ambiguous input are rejected instead of being authorized. All AgentMail-specific dependencies remain inside the separately published plugin.
+The pinned AgentMail SDK documents `from` as either `sender@example.com` or `Display Name <sender@example.com>`. The plugin uses a small dependency-free, fail-closed parser for one mailbox. It also accepts the unambiguous `<sender@example.com>` form and common unquoted comma-containing display names. Lists, groups, address-shaped display names, control characters, quoted local parts, internationalized addresses, and malformed or ambiguous input are rejected instead of being authorized. All AgentMail-specific dependencies remain inside the separately published plugin.
 
 ## Troubleshooting
 

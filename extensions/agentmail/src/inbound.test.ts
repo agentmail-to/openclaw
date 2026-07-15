@@ -1,10 +1,14 @@
 import { AgentMailError, type AgentMail } from "agentmail";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { dispatchAgentMailInboundEvent, resolveAgentMailMessageText } from "./inbound.js";
+import { AgentMailMediaPolicyError } from "./media.js";
 import type { AgentMailIngressRecord, ResolvedAgentMailAccount } from "./types.js";
 
-vi.mock("./media.js", () => ({
-  loadAgentMailInboundAttachments: vi.fn(async () => ({ paths: [], types: [] })),
+const loadAgentMailInboundAttachments = vi.hoisted(() => vi.fn());
+
+vi.mock("./media.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./media.js")>()),
+  loadAgentMailInboundAttachments,
 }));
 
 const hookVal = "test-value";
@@ -47,13 +51,102 @@ function message(overrides: Partial<AgentMail.Message> = {}): AgentMail.Message 
   };
 }
 
+const attachmentPolicyCases: Array<{
+  name: string;
+  overrides: Partial<AgentMail.Message>;
+  expectedBody: string;
+}> = [
+  {
+    name: "preserves text and omits all attachments after a deterministic media rejection",
+    overrides: {},
+    expectedBody: "hello\n\n[Attachments omitted because they exceed the configured media limit]",
+  },
+  {
+    name: "dispatches an omission notice when rejected attachments were the only content",
+    overrides: {
+      text: undefined,
+      extractedText: undefined,
+      html: undefined,
+      extractedHtml: undefined,
+      subject: undefined,
+    },
+    expectedBody: "[Attachments omitted because they exceed the configured media limit]",
+  },
+];
+
 describe("AgentMail REST-authoritative inbound", () => {
+  beforeEach(() => {
+    loadAgentMailInboundAttachments.mockReset();
+    loadAgentMailInboundAttachments.mockResolvedValue({ paths: [], types: [] });
+  });
+
   it("uses HTML fallback from the hydrated message", () => {
     expect(
       resolveAgentMailMessageText(
         message({ text: undefined, extractedText: undefined, html: "<p>Hello <b>world</b></p>" }),
       ),
     ).toBe("Hello world");
+  });
+
+  it("uses the hydrated subject when the message body is empty", () => {
+    expect(
+      resolveAgentMailMessageText(
+        message({
+          text: undefined,
+          extractedText: undefined,
+          html: undefined,
+          extractedHtml: undefined,
+          subject: "Subject-only request",
+        }),
+      ),
+    ).toBe("Subject-only request");
+  });
+
+  it.each(attachmentPolicyCases)("$name", async ({ overrides, expectedBody }) => {
+    loadAgentMailInboundAttachments.mockRejectedValueOnce(
+      new AgentMailMediaPolicyError("attachments exceed the configured aggregate media limit"),
+    );
+    let context: Record<string, unknown> | undefined;
+    await dispatchAgentMailInboundEvent({
+      cfg: {},
+      account,
+      record,
+      channelRuntime: {
+        routing: {
+          resolveAgentRoute: () => ({ agentId: "main" }),
+          buildAgentSessionKey: () => "session-thread-1",
+        },
+        inbound: {
+          buildContext: (value: Record<string, unknown>) => {
+            context = value;
+            return value;
+          },
+          run: async ({
+            raw,
+            adapter,
+          }: {
+            raw: AgentMail.Message;
+            adapter: Record<string, Function>;
+          }) => {
+            const ingested = adapter.ingest!(raw);
+            await adapter.resolveTurn!(ingested);
+          },
+        },
+        session: {
+          resolveStorePath: () => "/tmp/session.json",
+          recordInboundSession: vi.fn(),
+        },
+        reply: { dispatchReplyWithBufferedBlockDispatcher: vi.fn() },
+      } as never,
+      client: { inboxes: { messages: { get: vi.fn(async () => message(overrides)) } } } as never,
+    });
+
+    expect(context?.message).toEqual(
+      expect.objectContaining({
+        bodyForAgent: expectedBody,
+      }),
+    );
+    expect(context?.extra).toEqual(expect.objectContaining({ MediaPaths: [], MediaTypes: [] }));
   });
 
   it("hydrates positionally, keys sessions by inbox and thread, and fixes the reply target", async () => {

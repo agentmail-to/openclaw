@@ -25,7 +25,8 @@ export function resolveAgentMailMessageText(message: AgentMail.Message): string 
     return plain;
   }
   const html = message.html?.trim() || message.extractedHtml?.trim();
-  return html ? markdownToText(htmlToMarkdown(html).text).trim() : "";
+  const converted = html ? markdownToText(htmlToMarkdown(html).text).trim() : "";
+  return converted || message.subject?.trim() || "";
 }
 
 function hasRejectedLabel(message: AgentMail.Message): boolean {
@@ -97,6 +98,7 @@ export async function dispatchAgentMailInboundEvent(params: {
   }
 
   let inboundMedia;
+  let attachmentsOmitted = false;
   try {
     inboundMedia = await loadAgentMailInboundAttachments({
       client,
@@ -107,14 +109,22 @@ export async function dispatchAgentMailInboundEvent(params: {
     });
   } catch (error) {
     if (error instanceof AgentMailMediaPolicyError) {
-      params.log?.warn?.(`AgentMail rejected message ${message.messageId}: ${error.message}`);
-      return;
+      params.log?.warn?.(
+        `AgentMail omitted attachments from message ${message.messageId}: ${error.message}`,
+      );
+      inboundMedia = { paths: [], types: [] };
+      attachmentsOmitted = true;
+    } else {
+      throw error;
     }
-    throw error;
   }
-  const body =
+  const content =
     resolveAgentMailMessageText(message) ||
     (inboundMedia.paths.length > 0 ? "[Email with attachments]" : "");
+  const attachmentNotice = attachmentsOmitted
+    ? "[Attachments omitted because they exceed the configured media limit]"
+    : "";
+  const body = [content, attachmentNotice].filter(Boolean).join("\n\n");
   if (!body) {
     params.log?.warn?.(`AgentMail ignored empty message ${message.messageId}`);
     return;

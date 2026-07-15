@@ -6,7 +6,7 @@ const LOCAL_PART_PATTERN = /^[A-Za-z0-9!#$%&'*+/=?^_`{|}~.-]+$/u;
 const DOMAIN_LABEL_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/u;
 const CONTROL_OR_BIDI_PATTERN =
   /[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/u;
-const UNQUOTED_DISPLAY_SPECIALS_PATTERN = /[()[\]<>:;@,\\]/u;
+const UNQUOTED_DISPLAY_SPECIALS_PATTERN = /[()[\]<>:;@\\]/u;
 
 export function normalizeMailbox(value: string): string {
   return value.trim().toLocaleLowerCase("en-US");
@@ -98,7 +98,7 @@ export function parseSingleFromMailbox(value: string): { address: string; name?:
   }
 
   if (
-    open <= 0 ||
+    open < 0 ||
     close !== trimmed.length - 1 ||
     open !== trimmed.lastIndexOf("<") ||
     close !== trimmed.lastIndexOf(">") ||
@@ -107,9 +107,16 @@ export function parseSingleFromMailbox(value: string): { address: string; name?:
     return null;
   }
 
-  const name = parseDisplayName(trimmed.slice(0, open));
   const address = parseAsciiMailbox(trimmed.slice(open + 1, close).trim());
-  return name && address ? { address, name } : null;
+  if (!address) {
+    return null;
+  }
+  const rawName = trimmed.slice(0, open);
+  if (!rawName.trim()) {
+    return { address };
+  }
+  const name = parseDisplayName(rawName);
+  return name ? { address, name } : null;
 }
 
 export function isAgentMailSenderAllowed(params: {

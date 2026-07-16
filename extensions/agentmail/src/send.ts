@@ -191,6 +191,12 @@ export async function reconcileAgentMailUnknownSend(
         Boolean(value),
       );
   const text = rendered?.text ?? payload.text ?? "";
+  const recoveredPayload = { ...payload, text };
+  delete recoveredPayload.mediaUrl;
+  delete recoveredPayload.mediaUrls;
+  if (mediaUrls.length > 0) {
+    recoveredPayload.mediaUrls = mediaUrls;
+  }
   const result = await sendBoundAgentMailReply(
     {
       cfg: ctx.cfg,
@@ -198,11 +204,7 @@ export async function reconcileAgentMailUnknownSend(
       text,
       accountId: ctx.accountId,
       deliveryQueueId: ctx.queueId,
-      payload: {
-        ...payload,
-        text,
-        ...(mediaUrls.length > 0 ? { mediaUrls } : {}),
-      },
+      payload: recoveredPayload,
       ...(ctx.mediaAccess ? { mediaAccess: ctx.mediaAccess } : {}),
       ...(ctx.mediaLocalRoots ? { mediaLocalRoots: ctx.mediaLocalRoots } : {}),
       ...(ctx.mediaReadFile ? { mediaReadFile: ctx.mediaReadFile } : {}),

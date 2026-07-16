@@ -79,6 +79,7 @@ type DurableInboundReceiveJournal<TPayload, TMetadata, TCompletedMetadata> = {
 /** Queue-backed durable receive journal options with optional retention pruning. */
 type DurableInboundReceiveQueueJournalOptions<TPayload, TMetadata, TCompletedMetadata> = {
   queue: ChannelIngressQueue<TPayload, TMetadata, TCompletedMetadata>;
+  /** `pendingMaxEntries` is an admission limit; accepted pending rows are never pruned for space. */
   retention?: ChannelIngressQueuePruneOptions;
 };
 

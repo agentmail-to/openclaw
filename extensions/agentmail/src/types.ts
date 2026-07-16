@@ -35,6 +35,6 @@ export type AgentMailIngressRecord = {
   inboxId: string;
   messageId: string;
   eventId?: string;
-  transport: "webhook" | "websocket";
+  transport: "webhook" | "websocket" | "rest";
   receivedAt: number;
 };

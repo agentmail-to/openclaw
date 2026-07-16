@@ -34,6 +34,10 @@ function hasRejectedLabel(message: AgentMail.Message): boolean {
   return labels.some((label) => ["spam", "blocked", "unauthenticated"].includes(label));
 }
 
+function hasReceivedLabel(message: AgentMail.Message): boolean {
+  return message.labels.some((label) => label.toLocaleLowerCase("en-US") === "received");
+}
+
 async function hydrateMessage(params: {
   account: ResolvedAgentMailAccount;
   record: AgentMailIngressRecord;
@@ -73,6 +77,7 @@ export async function dispatchAgentMailInboundEvent(params: {
   if (
     message.inboxId !== params.account.inboxId ||
     message.messageId !== params.record.messageId ||
+    !hasReceivedLabel(message) ||
     hasRejectedLabel(message)
   ) {
     params.log?.warn?.(

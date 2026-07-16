@@ -5,9 +5,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { closeOpenClawStateDatabaseForTest } from "../../state/openclaw-state-db.js";
 import {
-  createDurableInboundReceiveJournal,
   createDurableInboundReceiveJournalFromQueue,
-  DurableInboundReceiveCapacityError,
 } from "./durable-receive.js";
 import { createChannelIngressQueue } from "./ingress-queue.js";
 
@@ -102,14 +100,14 @@ describe("createDurableInboundReceiveJournalFromQueue", () => {
       });
       const journal = createDurableInboundReceiveJournalFromQueue({
         queue,
-        retention: { pendingMaxEntries: 1 },
+        admission: { pendingMaxEntries: 1 },
       });
 
       await expect(journal.accept("message-1", { body: "first" })).resolves.toMatchObject({
         kind: "accepted",
       });
-      await expect(journal.accept("message-2", { body: "second" })).rejects.toBeInstanceOf(
-        DurableInboundReceiveCapacityError,
+      await expect(journal.accept("message-2", { body: "second" })).rejects.toThrow(
+        "Durable inbound receive queue is full (1 pending entries)",
       );
       await expect(journal.pending()).resolves.toMatchObject([
         { id: "message-1", payload: { body: "first" } },
@@ -118,6 +116,56 @@ describe("createDurableInboundReceiveJournalFromQueue", () => {
         kind: "pending",
         duplicate: true,
         record: { payload: { body: "first" } },
+      });
+    });
+  });
+
+  it("keeps pending retention pruning separate from admission capacity", async () => {
+    await withTempState(async (stateDir) => {
+      const queue = createChannelIngressQueue<TestPayload>({
+        channelId: "test",
+        accountId: "account",
+        stateDir,
+        now: () => 10,
+      });
+      const journal = createDurableInboundReceiveJournalFromQueue({
+        queue,
+        retention: { pendingMaxEntries: 1 },
+      });
+
+      await journal.accept("message-1", { body: "first" }, { receivedAt: 1 });
+      await expect(
+        journal.accept("message-2", { body: "second" }, { receivedAt: 2 }),
+      ).resolves.toMatchObject({ kind: "accepted" });
+      await expect(journal.pending()).resolves.toMatchObject([
+        { id: "message-2", payload: { body: "second" } },
+      ]);
+    });
+  });
+
+  it("keeps failed queue rows as terminal duplicate tombstones", async () => {
+    await withTempState(async (stateDir) => {
+      const queue = createChannelIngressQueue<TestPayload>({
+        channelId: "test",
+        accountId: "account",
+        stateDir,
+        now: () => 10,
+      });
+      const journal = createDurableInboundReceiveJournalFromQueue({ queue });
+
+      await journal.accept("message-1", { body: "poison" });
+      await expect(
+        journal.fail("message-1", {
+          reason: "dispatch_attempts_exhausted",
+          message: "bad payload",
+          failedAt: 20,
+        }),
+      ).resolves.toBe(true);
+      await expect(journal.pending()).resolves.toEqual([]);
+      await expect(journal.accept("message-1", { body: "again" })).resolves.toMatchObject({
+        kind: "completed",
+        duplicate: true,
+        record: { id: "message-1", completedAt: 20 },
       });
     });
   });

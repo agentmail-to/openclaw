@@ -4,7 +4,7 @@ import { agentMailPlugin } from "./channel.js";
 
 describe("agentmail@0.5.16 SDK positional contract", () => {
   it("declares one atomic payload send for ordinary outbound attachments", () => {
-    expect(agentMailPlugin.message?.send?.atomicMediaPayloads).toBe(true);
+    expect(agentMailPlugin.message?.send?.mediaPayloadMode).toBe("atomic");
     expect(agentMailPlugin.message?.send?.payload).toEqual(expect.any(Function));
   });
 
@@ -13,6 +13,13 @@ describe("agentmail@0.5.16 SDK positional contract", () => {
     type Attachment = Awaited<ReturnType<Messages["getAttachment"]>>;
     expectTypeOf<Parameters<Messages["get"]>[0]>().toEqualTypeOf<string>();
     expectTypeOf<Parameters<Messages["get"]>[1]>().toEqualTypeOf<string>();
+    expectTypeOf<Parameters<Messages["list"]>[0]>().toEqualTypeOf<string>();
+    expectTypeOf<NonNullable<Parameters<Messages["list"]>[1]>>().toMatchTypeOf<{
+      pageToken?: string;
+      labels?: string[];
+      after?: Date;
+      ascending?: boolean;
+    }>();
     expectTypeOf<Parameters<Messages["reply"]>[0]>().toEqualTypeOf<string>();
     expectTypeOf<Parameters<Messages["reply"]>[1]>().toEqualTypeOf<string>();
     expectTypeOf<Parameters<Messages["reply"]>[2]>().toMatchTypeOf<{
@@ -39,9 +46,12 @@ describe("agentmail@0.5.16 SDK positional contract", () => {
     }>();
     expectTypeOf<Parameters<Webhooks["delete"]>[0]>().toEqualTypeOf<string>();
     expectTypeOf<Parameters<Webhooks["delete"]>[1]>().toEqualTypeOf<string>();
-    expectTypeOf<Parameters<AgentMailClient["websockets"]["connect"]>[0]>().toMatchTypeOf<{
+    expectTypeOf<
+      NonNullable<Parameters<AgentMailClient["websockets"]["connect"]>[0]>
+    >().toMatchTypeOf<{
       apiKey?: string;
       abortSignal?: AbortSignal;
+      waitForOpen?: boolean;
     }>();
     expectTypeOf<Parameters<Socket["sendSubscribe"]>[0]>().toMatchTypeOf<{
       type: "subscribe";

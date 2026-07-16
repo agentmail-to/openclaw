@@ -1,3 +1,4 @@
+import type { AgentMailClient } from "agentmail";
 import { describe, expect, it, vi } from "vitest";
 import {
   normalizeAgentMailTarget,
@@ -6,7 +7,12 @@ import {
   sendAgentMailReply,
 } from "./send.js";
 
-const reply = vi.fn(async () => ({ messageId: "reply_1", threadId: "thread_1" }));
+type ReplyArgs = Parameters<AgentMailClient["inboxes"]["messages"]["reply"]>;
+
+const reply = vi.fn(async (..._args: ReplyArgs) => ({
+  messageId: "reply_1",
+  threadId: "thread_1",
+}));
 const loadAgentMailOutboundAttachments = vi.hoisted(() =>
   vi.fn(async () => [
     {
@@ -73,7 +79,7 @@ describe("AgentMail reply-only outbound", () => {
     expect(request).not.toHaveProperty("cc");
     expect(request).not.toHaveProperty("bcc");
     expect(request).not.toHaveProperty("replyTo");
-    expect(requestOptions.idempotencyKey).toMatch(/^openclaw-agentmail-[a-f0-9]{64}$/u);
+    expect(requestOptions?.idempotencyKey).toMatch(/^openclaw-agentmail-[a-f0-9]{64}$/u);
   });
 
   it("rejects a different target than the active turn's triggering message", async () => {

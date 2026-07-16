@@ -5,6 +5,11 @@ import type { ResolvedAgentMailAccount } from "./types.js";
 const mocks = vi.hoisted(() => ({
   routes: [] as Array<{ path: string; unregister: ReturnType<typeof vi.fn> }>,
   startWebSocket: vi.fn(async () => undefined),
+  processIngress: vi.fn(async () => "accepted"),
+  catchUpRun: vi.fn(async () => undefined),
+  catchUpRequest: vi.fn(),
+  catchUpSettle: vi.fn(async () => undefined),
+  webhookReceives: [] as Array<(record: unknown) => Promise<void>>,
 }));
 const apiVal = "key";
 const hookVal = "hook-value";
@@ -35,13 +40,24 @@ vi.mock("./durable-receive.js", () => ({
   createAgentMailDurableInboundReceiveJournal: () => ({}),
 }));
 
+vi.mock("./catch-up.js", () => ({
+  createAgentMailCatchUpSession: vi.fn(async () => ({ run: mocks.catchUpRun })),
+  createAgentMailCatchUpSupervisor: vi.fn(() => ({
+    request: mocks.catchUpRequest,
+    settle: mocks.catchUpSettle,
+  })),
+}));
+
 vi.mock("./ingress.js", () => ({
-  processAgentMailIngress: vi.fn(async () => "accepted"),
+  processAgentMailIngress: mocks.processIngress,
   replayPendingAgentMailIngress: vi.fn(async () => undefined),
 }));
 
 vi.mock("./webhook.js", () => ({
-  createAgentMailWebhookHandler: () => vi.fn(),
+  createAgentMailWebhookHandler: ({ receive }: { receive: (record: unknown) => Promise<void> }) => {
+    mocks.webhookReceives.push(receive);
+    return vi.fn();
+  },
 }));
 
 vi.mock("./websocket.js", () => ({
@@ -75,6 +91,36 @@ describe("AgentMail gateway route ownership", () => {
     });
     expect(mocks.startWebSocket).toHaveBeenCalledOnce();
     expect(mocks.routes).toHaveLength(0);
+  });
+
+  it("starts REST recovery and requests it again after webhook admission failure", async () => {
+    mocks.routes.length = 0;
+    mocks.webhookReceives.length = 0;
+    mocks.catchUpRequest.mockClear();
+    mocks.processIngress.mockReset();
+    mocks.processIngress.mockRejectedValueOnce(new Error("queue full"));
+    const controller = new AbortController();
+    const running = startAgentMailGatewayAccount({
+      cfg: {},
+      account: account("support", "/webhooks/agentmail/support"),
+      channelRuntime: {} as never,
+      abortSignal: controller.signal,
+    });
+    await vi.waitFor(() => expect(mocks.webhookReceives).toHaveLength(1));
+    expect(mocks.catchUpRequest).toHaveBeenCalledOnce();
+
+    await expect(
+      mocks.webhookReceives[0]?.({
+        accountId: "support",
+        inboxId: "inbox_support",
+        messageId: "message_1",
+        transport: "webhook",
+        receivedAt: 1,
+      }),
+    ).rejects.toThrow("queue full");
+    expect(mocks.catchUpRequest).toHaveBeenCalledTimes(2);
+    controller.abort();
+    await running;
   });
 
   it("releases an account's old path without letting stale cleanup remove its replacement", async () => {

@@ -6,6 +6,7 @@ const handlers = new Map<string, (value?: unknown) => void>();
 const sendSubscribe = vi.fn();
 const close = vi.fn();
 const waitForOpen = vi.fn(async () => undefined);
+const catchUpRun = vi.fn(async () => undefined);
 const connect = vi.fn(async () => ({
   on: (event: string, handler: (value?: unknown) => void) => handlers.set(event, handler),
   sendSubscribe,
@@ -38,22 +39,29 @@ describe("AgentMail WebSocket ingress", () => {
     sendSubscribe.mockClear();
     close.mockClear();
     connect.mockClear();
+    catchUpRun.mockClear();
     const receive = vi.fn(async () => undefined);
     const controller = new AbortController();
     const running = startAgentMailWebSocket({
       account,
       abortSignal: controller.signal,
       receive,
+      catchUpSession: { run: catchUpRun },
     });
     await vi.waitFor(() => expect(handlers.has("open")).toBe(true));
     expect(connect).toHaveBeenCalledWith(
-      expect.objectContaining({ reconnectAttempts: Number.POSITIVE_INFINITY }),
+      expect.objectContaining({
+        reconnectAttempts: Number.POSITIVE_INFINITY,
+        waitForOpen: false,
+      }),
     );
     expect(waitForOpen).not.toHaveBeenCalled();
     handlers.get("open")?.();
+    await vi.waitFor(() => expect(catchUpRun).toHaveBeenCalledOnce());
     handlers.get("close")?.();
     handlers.get("open")?.();
     expect(sendSubscribe).toHaveBeenCalledTimes(2);
+    await vi.waitFor(() => expect(catchUpRun).toHaveBeenCalledTimes(2));
     expect(sendSubscribe).toHaveBeenLastCalledWith({
       type: "subscribe",
       inboxIds: ["inbox_1"],
@@ -87,6 +95,7 @@ describe("AgentMail WebSocket ingress", () => {
       account,
       abortSignal: controller.signal,
       receive: vi.fn(async () => undefined),
+      catchUpSession: { run: catchUpRun },
     });
     await vi.waitFor(() => expect(handlers.has("open")).toBe(true));
     controller.abort();
@@ -107,6 +116,7 @@ describe("AgentMail WebSocket ingress", () => {
       abortSignal: controller.signal,
       receive: receive as never,
       retryDelayMs: () => 0,
+      catchUpSession: { run: catchUpRun },
     });
     await vi.waitFor(() => expect(handlers.has("message")).toBe(true));
     handlers.get("message")?.({
@@ -115,6 +125,44 @@ describe("AgentMail WebSocket ingress", () => {
       message: { inboxId: "inbox_1", messageId: "message_retry" },
     });
     await vi.waitFor(() => expect(receive).toHaveBeenCalledTimes(2));
+    controller.abort();
+    await running;
+  });
+
+  it("bounds live admission and uses REST catch-up for overflow", async () => {
+    handlers.clear();
+    catchUpRun.mockClear();
+    let finishReceive!: () => void;
+    const receive = vi.fn(
+      async () =>
+        await new Promise<void>((resolve) => {
+          finishReceive = resolve;
+        }),
+    );
+    const controller = new AbortController();
+    const running = startAgentMailWebSocket({
+      account,
+      abortSignal: controller.signal,
+      receive,
+      catchUpSession: { run: catchUpRun },
+      liveQueueMax: 1,
+    });
+    await vi.waitFor(() => expect(handlers.has("message")).toBe(true));
+    handlers.get("message")?.({
+      type: "event",
+      eventType: "message.received",
+      message: { inboxId: "inbox_1", messageId: "message_1" },
+    });
+    await vi.waitFor(() => expect(receive).toHaveBeenCalledOnce());
+    handlers.get("message")?.({
+      type: "event",
+      eventType: "message.received",
+      message: { inboxId: "inbox_1", messageId: "message_2" },
+    });
+    await vi.waitFor(() => expect(catchUpRun).toHaveBeenCalledOnce());
+    expect(receive).toHaveBeenCalledOnce();
+
+    finishReceive();
     controller.abort();
     await running;
   });

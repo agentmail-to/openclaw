@@ -60,6 +60,13 @@ type DurableInboundReceiveReleaseOptions = {
   releasedAt?: number;
 };
 
+/** Options recorded when terminally failing an inbound event. */
+type DurableInboundReceiveFailOptions = {
+  reason: string;
+  message?: string;
+  failedAt?: number;
+};
+
 /** Durable receive journal facade used by channel receive pipelines. */
 type DurableInboundReceiveJournal<TPayload, TMetadata, TCompletedMetadata> = {
   accept(
@@ -73,18 +80,21 @@ type DurableInboundReceiveJournal<TPayload, TMetadata, TCompletedMetadata> = {
     options?: DurableInboundReceiveCompleteOptions<TCompletedMetadata>,
   ): Promise<void>;
   release(id: string, options?: DurableInboundReceiveReleaseOptions): Promise<boolean>;
+  /** Optional terminal-failure support; queue-backed journals provide it. */
+  fail?(id: string, options: DurableInboundReceiveFailOptions): Promise<boolean>;
   deletePending(id: string): Promise<boolean>;
 };
 
-/** Queue-backed durable receive journal options with optional retention pruning. */
-type DurableInboundReceiveQueueJournalOptions<TPayload, TMetadata, TCompletedMetadata> = {
+/** Queue-backed durable receive journal options with independent retention and admission policy. */
+export type DurableInboundReceiveQueueJournalOptions<TPayload, TMetadata, TCompletedMetadata> = {
   queue: ChannelIngressQueue<TPayload, TMetadata, TCompletedMetadata>;
-  /** `pendingMaxEntries` is an admission limit; accepted pending rows are never pruned for space. */
   retention?: ChannelIngressQueuePruneOptions;
+  /** Reject new ids at this bound without changing retention behavior for existing callers. */
+  admission?: { pendingMaxEntries?: number };
 };
 
 /** Raised when durable ingress cannot admit a new id without evicting accepted pending work. */
-export class DurableInboundReceiveCapacityError extends Error {
+class DurableInboundReceiveCapacityError extends Error {
   readonly maxPendingEntries: number;
 
   constructor(maxPendingEntries: number) {
@@ -110,15 +120,10 @@ export function createDurableInboundReceiveJournalFromQueue<
 >(
   options: DurableInboundReceiveQueueJournalOptions<TPayload, TMetadata, TCompletedMetadata>,
 ): DurableInboundReceiveJournal<TPayload, TMetadata, TCompletedMetadata> {
-  const pendingMaxEntries = options.retention?.pendingMaxEntries;
-  const pruneRetention = options.retention ? { ...options.retention } : undefined;
-  if (pruneRetention) {
-    delete pruneRetention.pendingMaxEntries;
-  }
   const prune = async (protectId?: string) => {
-    if (pruneRetention) {
+    if (options.retention) {
       await options.queue.prune({
-        ...pruneRetention,
+        ...options.retention,
         ...(protectId === undefined ? {} : { protectIds: [protectId] }),
       });
     }
@@ -131,7 +136,9 @@ export function createDurableInboundReceiveJournalFromQueue<
         ...(acceptOptions?.receivedAt === undefined
           ? {}
           : { receivedAt: acceptOptions.receivedAt }),
-        ...(pendingMaxEntries === undefined ? {} : { maxPendingEntries: pendingMaxEntries }),
+        ...(options.admission?.pendingMaxEntries === undefined
+          ? {}
+          : { maxPendingEntries: options.admission.pendingMaxEntries }),
       });
       if (result.kind === "capacity") {
         throw new DurableInboundReceiveCapacityError(result.maxPendingEntries);
@@ -146,15 +153,14 @@ export function createDurableInboundReceiveJournalFromQueue<
       if (result.kind === "pending" || result.kind === "claimed") {
         return { kind: "pending", duplicate: true, record: result.record };
       }
+      // Failed queue rows are terminal tombstones. Treat redelivery as completed so callers do
+      // not recreate poison work while the failed-retention window is active.
       return {
-        kind: "pending",
+        kind: "completed",
         duplicate: true,
         record: {
           id: result.record.id,
-          payload,
-          receivedAt: result.record.failedAt,
-          updatedAt: result.record.failedAt,
-          attempts: 0,
+          completedAt: result.record.failedAt,
         },
       };
     },
@@ -180,6 +186,11 @@ export function createDurableInboundReceiveJournalFromQueue<
       });
       await prune(normalizeDurableInboundReceiveId(id));
       return released;
+    },
+    fail: async (id, failOptions) => {
+      const failed = await options.queue.fail(normalizeDurableInboundReceiveId(id), failOptions);
+      await prune(normalizeDurableInboundReceiveId(id));
+      return failed;
     },
     deletePending: async (id) => {
       const deleted = await options.queue.delete(normalizeDurableInboundReceiveId(id));

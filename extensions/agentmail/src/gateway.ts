@@ -1,6 +1,7 @@
 import { waitUntilAbort } from "openclaw/plugin-sdk/channel-outbound";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { registerPluginHttpRoute } from "openclaw/plugin-sdk/webhook-ingress";
+import { createAgentMailCatchUpSession, createAgentMailCatchUpSupervisor } from "./catch-up.js";
 import { createAgentMailDurableInboundReceiveJournal } from "./durable-receive.js";
 import { dispatchAgentMailInboundEvent, type AgentMailChannelRuntime } from "./inbound.js";
 import { processAgentMailIngress, replayPendingAgentMailIngress } from "./ingress.js";
@@ -105,12 +106,36 @@ export async function startAgentMailGatewayAccount(params: {
       routeOwners.delete(previousRoute.path);
     }
   }
+  const catchUpSession = await createAgentMailCatchUpSession({
+    account: params.account,
+    log: params.log,
+  });
+  const catchUpSupervisor = createAgentMailCatchUpSupervisor({
+    session: catchUpSession,
+    receive,
+    abortSignal: params.abortSignal,
+    log: params.log,
+  });
+  const receiveWithRecovery = async (record: AgentMailIngressRecord) => {
+    try {
+      await receive(record);
+    } catch (error) {
+      // Provider retries remain useful, but REST recovery is the durable fallback if the provider
+      // exhausts them while local admission is full or temporarily unavailable.
+      catchUpSupervisor.request();
+      throw error;
+    }
+  };
   const unregister = registerPluginHttpRoute({
     path,
     auth: "plugin",
     pluginId: "agentmail",
     accountId: params.account.accountId,
-    handler: createAgentMailWebhookHandler({ account: params.account, receive, log: params.log }),
+    handler: createAgentMailWebhookHandler({
+      account: params.account,
+      receive: receiveWithRecovery,
+      log: params.log,
+    }),
   });
   const activeRoute = { path, unregister };
   activeRoutes.set(params.account.accountId, activeRoute);
@@ -118,6 +143,7 @@ export async function startAgentMailGatewayAccount(params: {
   params.log?.info?.(
     `Registered AgentMail webhook route ${path} for account ${params.account.accountId}`,
   );
+  catchUpSupervisor.request();
   await waitUntilAbort(params.abortSignal, () => {
     // A replaced account invocation can abort later; it must not delete the newer registration.
     if (activeRoutes.get(params.account.accountId) === activeRoute) {
@@ -128,4 +154,5 @@ export async function startAgentMailGatewayAccount(params: {
       }
     }
   });
+  await catchUpSupervisor.settle();
 }

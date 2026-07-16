@@ -88,7 +88,7 @@ const messageAdapter = defineChannelMessageAdapter({
     reconcileUnknownSend: reconcileAgentMailUnknownSend,
   },
   send: {
-    atomicMediaPayloads: true,
+    mediaPayloadMode: "atomic",
     text: async (ctx) => await sendAgentMailReply(ctx),
     payload: async (ctx) => await sendAgentMailReply(ctx),
   },

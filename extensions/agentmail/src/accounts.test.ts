@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { listAgentMailAccountIds, resolveAgentMailAccount } from "./accounts.js";
 import { AgentMailChannelConfigSchema } from "./config-schema.js";
+import type { AgentMailChannelConfig } from "./types.js";
 
 const paddedApi = " api-key ";
 const apiVal = "api-key";
@@ -100,7 +101,7 @@ describe("AgentMail account config", () => {
     if (!result?.success) {
       throw new Error("expected AgentMail config to parse");
     }
-    const parsed = result.data;
+    const parsed = result.data as AgentMailChannelConfig;
     expect(parsed?.accounts?.support).not.toHaveProperty("dmPolicy");
     expect(parsed?.accounts?.support).not.toHaveProperty("mediaMaxMb");
     expect(

@@ -33,11 +33,11 @@ export function createAgentMailDurableInboundReceiveJournal(params: {
   );
   return createDurableInboundReceiveJournalFromQueue({
     queue,
+    admission: { pendingMaxEntries: AGENTMAIL_DURABLE_PENDING_MAX_ENTRIES },
     retention: {
       pendingTtlMs: AGENTMAIL_DURABLE_PENDING_TTL_MS,
       completedTtlMs: AGENTMAIL_DURABLE_COMPLETED_TTL_MS,
       failedTtlMs: AGENTMAIL_DURABLE_PENDING_TTL_MS,
-      pendingMaxEntries: AGENTMAIL_DURABLE_PENDING_MAX_ENTRIES,
       completedMaxEntries: AGENTMAIL_DURABLE_COMPLETED_MAX_ENTRIES,
       failedMaxEntries: AGENTMAIL_DURABLE_PENDING_MAX_ENTRIES,
     },

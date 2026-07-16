@@ -1,6 +1,14 @@
 import type { AgentMail } from "agentmail";
+import { computeBackoff, sleepWithAbort } from "openclaw/plugin-sdk/runtime-env";
+import {
+  createAgentMailCatchUpSession,
+  createAgentMailCatchUpSupervisor,
+  type AgentMailCatchUpSession,
+} from "./catch-up.js";
 import { createAgentMailClient } from "./client.js";
 import type { AgentMailIngressRecord, ResolvedAgentMailAccount } from "./types.js";
+
+const AGENTMAIL_WEBSOCKET_LIVE_QUEUE_MAX = 32;
 
 type WebSocketLog = {
   info?: (message: string) => void;
@@ -17,24 +25,16 @@ function isReceivedEvent(value: unknown): value is AgentMail.MessageReceivedEven
 }
 
 function websocketRetryDelayMs(attempt: number): number {
-  return Math.min(1_000 * 2 ** Math.min(Math.max(attempt - 1, 0), 5), 30_000);
+  return computeBackoff({ initialMs: 1_000, maxMs: 30_000, factor: 2, jitter: 0.2 }, attempt);
 }
 
 async function waitForRetry(signal: AbortSignal, delayMs: number): Promise<boolean> {
-  if (signal.aborted) {
+  try {
+    await sleepWithAbort(delayMs, signal);
+    return !signal.aborted;
+  } catch {
     return false;
   }
-  return await new Promise<boolean>((resolve) => {
-    const timer = setTimeout(() => {
-      signal.removeEventListener("abort", onAbort);
-      resolve(true);
-    }, delayMs);
-    const onAbort = () => {
-      clearTimeout(timer);
-      resolve(false);
-    };
-    signal.addEventListener("abort", onAbort, { once: true });
-  });
 }
 
 async function receiveUntilDurable(params: {
@@ -67,15 +67,70 @@ export async function startAgentMailWebSocket(params: {
   receive: (record: AgentMailIngressRecord) => Promise<void>;
   log?: WebSocketLog;
   retryDelayMs?: (attempt: number) => number;
+  catchUpSession?: AgentMailCatchUpSession;
+  liveQueueMax?: number;
 }): Promise<void> {
   const client = createAgentMailClient(params.account);
+  const catchUpSession =
+    params.catchUpSession ??
+    (await createAgentMailCatchUpSession({
+      account: params.account,
+      client,
+      log: params.log,
+    }));
   const socket = await client.websockets.connect({
     apiKey: params.account.apiKey,
     abortSignal: params.abortSignal,
     // The pinned SDK bounds exponential delay at 10 seconds. Infinity keeps recovery alive across
     // long outages instead of silently exhausting the SDK's default 30-attempt budget.
     reconnectAttempts: Number.POSITIVE_INFINITY,
+    // agentmail@0.5.16 waits only for open/error by default; an abort closes the socket and would
+    // otherwise leave connect() pending before this function can register its lifecycle handlers.
+    waitForOpen: false,
   });
+  const retryDelay = params.retryDelayMs ?? websocketRetryDelayMs;
+  const liveQueueMax = params.liveQueueMax ?? AGENTMAIL_WEBSOCKET_LIVE_QUEUE_MAX;
+  const liveQueue: AgentMailIngressRecord[] = [];
+  const queuedMessageIds = new Set<string>();
+  let liveWorker: Promise<void> | undefined;
+  const catchUpSupervisor = createAgentMailCatchUpSupervisor({
+    session: catchUpSession,
+    receive: params.receive,
+    abortSignal: params.abortSignal,
+    retryDelayMs: retryDelay,
+    log: params.log,
+  });
+
+  const runLiveWorker = (): void => {
+    if (liveWorker) {
+      return;
+    }
+    liveWorker = (async () => {
+      while (!params.abortSignal.aborted) {
+        const record = liveQueue.shift();
+        if (!record) {
+          return;
+        }
+        try {
+          await receiveUntilDurable({
+            record,
+            receive: params.receive,
+            abortSignal: params.abortSignal,
+            retryDelay,
+            log: params.log,
+          });
+        } finally {
+          queuedMessageIds.delete(record.messageId);
+        }
+      }
+    })().finally(() => {
+      liveWorker = undefined;
+      if (liveQueue.length > 0 && !params.abortSignal.aborted) {
+        runLiveWorker();
+      }
+    });
+  };
+
   let subscribedForCurrentConnection = false;
   const subscribe = () => {
     if (subscribedForCurrentConnection) {
@@ -88,6 +143,9 @@ export async function startAgentMailWebSocket(params: {
     });
     subscribedForCurrentConnection = true;
     params.log?.info?.(`AgentMail WebSocket subscribed for account ${params.account.accountId}`);
+    // Subscribe first, then overlap the persisted REST cursor. Live and catch-up events share the
+    // same durable id, closing restart/reconnect gaps without creating duplicate turns.
+    catchUpSupervisor.request();
   };
   socket.on("open", subscribe);
   socket.on("close", () => {
@@ -101,20 +159,26 @@ export async function startAgentMailWebSocket(params: {
       params.log?.warn?.("AgentMail WebSocket ignored an event for the wrong inbox");
       return;
     }
-    void receiveUntilDurable({
-      record: {
-        accountId: params.account.accountId,
-        inboxId: event.message.inboxId,
-        messageId: event.message.messageId,
-        eventId: event.eventId,
-        transport: "websocket",
-        receivedAt: Date.now(),
-      },
-      receive: params.receive,
-      abortSignal: params.abortSignal,
-      retryDelay: params.retryDelayMs ?? websocketRetryDelayMs,
-      log: params.log,
+    if (queuedMessageIds.has(event.message.messageId)) {
+      return;
+    }
+    if (queuedMessageIds.size >= liveQueueMax) {
+      // Keep the process-local backlog bounded. REST catch-up remains the authoritative recovery
+      // source for events dropped while durable admission is backpressured.
+      params.log?.warn?.("AgentMail WebSocket live admission is full; scheduling REST catch-up");
+      catchUpSupervisor.request();
+      return;
+    }
+    queuedMessageIds.add(event.message.messageId);
+    liveQueue.push({
+      accountId: params.account.accountId,
+      inboxId: event.message.inboxId,
+      messageId: event.message.messageId,
+      eventId: event.eventId,
+      transport: "websocket",
+      receivedAt: Date.now(),
     });
+    runLiveWorker();
   });
   // The SDK's waitForOpen() does not settle when an initial connection is aborted. Register the
   // lifecycle listeners immediately and close the already-open race from readyState instead.
@@ -136,4 +200,8 @@ export async function startAgentMailWebSocket(params: {
       { once: true },
     );
   });
+  const workers = [liveWorker, catchUpSupervisor.settle()].filter(
+    (worker): worker is Promise<void> => worker !== undefined,
+  );
+  await Promise.allSettled(workers);
 }

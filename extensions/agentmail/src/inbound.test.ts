@@ -38,7 +38,7 @@ function message(overrides: Partial<AgentMail.Message> = {}): AgentMail.Message 
     inboxId: "inbox_1",
     threadId: "thread_1",
     messageId: "message_1",
-    labels: [],
+    labels: ["received"],
     timestamp: new Date("2026-07-15T00:00:00Z"),
     from: "Sender <sender@example.com>",
     to: ["inbox@example.com"],
@@ -249,6 +249,20 @@ describe("AgentMail REST-authoritative inbound", () => {
     ).resolves.toBeUndefined();
     expect(run).not.toHaveBeenCalled();
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("unsafe hydrated message"));
+  });
+
+  it("rejects a REST-listed outbound message without a received label", async () => {
+    const run = vi.fn();
+    await dispatchAgentMailInboundEvent({
+      cfg: {},
+      account,
+      record,
+      channelRuntime: { inbound: { run } } as never,
+      client: {
+        inboxes: { messages: { get: vi.fn(async () => message({ labels: ["sent"] })) } },
+      } as never,
+    });
+    expect(run).not.toHaveBeenCalled();
   });
 
   it("settles an authoritatively deleted message without retrying", async () => {

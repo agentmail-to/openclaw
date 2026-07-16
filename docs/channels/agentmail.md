@@ -44,7 +44,7 @@ POST https://gateway.example.com/webhooks/agentmail
 event type: message.received
 ```
 
-The plugin verifies the Svix signature over the untouched request body before parsing it. It accepts at most 1 MiB of webhook data and acknowledges only after the shared SQLite ingress queue commits the event. Expose only the configured webhook path through your reverse proxy.
+The plugin verifies the Svix signature over the untouched request body before parsing it. It accepts at most 1 MiB of webhook data and acknowledges only after the shared SQLite ingress queue commits the event. If admission is temporarily unavailable, it returns `503` for provider retry and also starts bounded REST recovery from its persisted cursor. Expose only the configured webhook path through your reverse proxy.
 
 For named accounts, the default path is `/webhooks/agentmail/<accountId>`. Set an explicit `webhookPath` when your public routing requires a different path. Paths must be unique across accounts.
 
@@ -61,7 +61,7 @@ channels:
     allowFrom: [sender@example.com]
 ```
 
-Webhook and WebSocket are configuration alternatives. The plugin does not switch to WebSocket because a configured webhook has been quiet or unreachable. WebSocket reconnects re-subscribe to the configured inbox and `message.received` event.
+Webhook and WebSocket are configuration alternatives. The plugin does not switch to WebSocket because a configured webhook has been quiet or unreachable. WebSocket mode re-subscribes on every connection and requests REST recovery from the plugin's durable cursor. The recovery path paginates authoritative `received` messages from AgentMail with a short overlap window. The shared message digest deduplicates overlap with live WebSocket or webhook events, closing restart, connection-gap, and exhausted-provider-retry windows without replaying pre-install mailbox history.
 
 ## Sender security
 
@@ -98,7 +98,9 @@ Outbound text and attachments are normalized and loaded before one AgentMail rep
 
 ## Durability
 
-Webhook and WebSocket events share a digest of account ID, inbox ID, and message ID, so retries, reconnects, and transport changes deduplicate to one turn. OpenClaw persists restart-recovery delivery state before agent or tool execution, and the plugin durably adopts the turn by completing its ingress row at that boundary. A fresh turn does not start if completion fails. If an active turn was already irrevocably queued, ingress retries only the completion marker and never redispatches it. After successful adoption, core recovery owns interrupted delivery. Pending and failed ingress records are retained for 30 days; completed records for 7 days. The pending journal admits at most 450 records and rejects new webhook/WebSocket ingress for provider retry when full; it never evicts already-accepted pending mail to make room. Completed and failed tombstones are capped at 450 records. These values follow the WhatsApp durable-receive precedent.
+Webhook, live WebSocket, and REST catch-up records share a digest of account ID, inbox ID, and message ID, so retries, reconnects, overlap, and transport changes deduplicate to one turn. OpenClaw persists restart-recovery delivery state before agent or tool execution, and the plugin durably adopts the turn by completing its ingress row at that boundary. A fresh turn does not start if completion fails. If an active turn was already irrevocably queued, ingress retries only the completion marker and never redispatches it. After successful adoption, core recovery owns interrupted delivery.
+
+Pending and failed ingress records are retained for 30 days; completed records for 7 days. AgentMail uses an explicit 450-record admission limit that never evicts accepted pending mail. A message that fails dispatch 12 times is moved to a failed tombstone, freeing admission capacity without allowing transport redelivery to recreate poison work. Completed and failed tombstones are capped at 450 records. The retention windows and bounds follow the WhatsApp precedent, while AgentMail's reject-new admission policy is plugin-owned and does not change WhatsApp's existing retention behavior. Live WebSocket admission is also process-bounded; overflow is recovered by the single REST catch-up supervisor rather than accumulated as unbounded promises.
 
 Unknown outbound sends are retried only while AgentMail's queue-derived idempotency key is safely inside the provider's 24-hour retention window. Recovery reconstructs the original agent-scoped local-media capability before reloading attachments. Once the key is within one hour of expiry, the delivery fails closed for operator review instead of risking a duplicate email.
 
@@ -114,7 +116,7 @@ The pinned AgentMail SDK documents `from` as either `sender@example.com` or `Dis
 - `413`: the webhook body exceeds 1 MiB.
 - `503`: the durable queue commit failed, so AgentMail should retry the webhook.
 - No agent turn: verify the hydrated `From` mailbox appears in `allowFrom`; an empty list denies everyone.
-- WebSocket did not start: remove `webhookSecret`; its presence always selects webhook mode.
+- WebSocket did not start: remove `webhookSecret`; its presence always selects webhook mode. Check API access to both WebSockets and `messages.list`, because durable WebSocket recovery needs both.
 - Outbound target rejected: use only the `message:<messageId>` target from the triggering inbound turn.
 
 Run `openclaw channels status --probe` after changing configuration, then restart the Gateway because plugin metadata and ingress registration are process-stable.

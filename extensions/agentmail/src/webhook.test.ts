@@ -123,14 +123,16 @@ describe("AgentMail webhook", () => {
     expect(receive).not.toHaveBeenCalled();
   });
 
-  it("rejects malformed signed received events", async () => {
+  it("acknowledges malformed signed received events without dispatch", async () => {
     const body = JSON.stringify({ type: "event", event_type: "message.received" });
     const res = response();
-    await createAgentMailWebhookHandler({ account: account(), receive: vi.fn() })(
+    const receive = vi.fn();
+    await createAgentMailWebhookHandler({ account: account(), receive })(
       request(body, signed(body)),
       res,
     );
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(200);
+    expect(receive).not.toHaveBeenCalled();
   });
 
   it("returns retryable failure when durable receipt fails", async () => {

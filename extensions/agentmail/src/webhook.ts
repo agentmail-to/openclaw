@@ -82,7 +82,8 @@ export function createAgentMailWebhookHandler(params: {
         ? (verified as Record<string, unknown>).event_type
         : undefined;
     if (typeof eventType !== "string") {
-      return respond(res, 400, "Invalid event");
+      params.log?.warn?.("AgentMail webhook ignored a signed event without an event type");
+      return respond(res, 200);
     }
     if (eventType !== "message.received") {
       params.log?.warn?.(
@@ -92,7 +93,9 @@ export function createAgentMailWebhookHandler(params: {
     }
     const event = parseVerifiedEvent(verified);
     if (!event) {
-      return respond(res, 400, "Invalid event");
+      // Signature verification succeeded, but retrying cannot repair a provider payload shape.
+      params.log?.warn?.("AgentMail webhook ignored a malformed signed received event");
+      return respond(res, 200);
     }
     if (event.inboxId !== params.account.inboxId) {
       // The signature is valid but this route cannot ever own the inbox. Acknowledge permanently

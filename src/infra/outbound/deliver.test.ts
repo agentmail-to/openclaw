@@ -1075,7 +1075,7 @@ describe("deliverOutboundPayloads", () => {
                 capabilities: { text: true, media: true, payload: true },
               },
               send: {
-                atomicMediaPayloads: true,
+                mediaPayloadMode: "atomic",
                 text: sendText,
                 payload: sendPayload,
               },

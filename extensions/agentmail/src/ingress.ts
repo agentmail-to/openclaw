@@ -1,3 +1,4 @@
+import { computeBackoff, sleepWithAbort } from "openclaw/plugin-sdk/runtime-env";
 import type { createAgentMailDurableInboundReceiveJournal } from "./durable-receive.js";
 import { createAgentMailDurableInboundId } from "./durable-receive.js";
 import type { AgentMailIngressRecord } from "./types.js";
@@ -12,6 +13,7 @@ type DispatchParams = {
   abortSignal?: AbortSignal;
   retryDelay?: (attempt: number) => number;
   initialAttempts: number;
+  maxDispatchAttempts: number;
   dispatchCompleted?: boolean;
 };
 
@@ -29,25 +31,19 @@ type ActiveDispatch = {
 // restarts that open separate journal facades over the same shared queue.
 const activeDispatches = new Map<string, ActiveDispatch>();
 
+export const AGENTMAIL_INGRESS_MAX_DISPATCH_ATTEMPTS = 12;
+
 function retryDelayMs(attempt: number): number {
-  return Math.min(1_000 * 2 ** Math.min(Math.max(attempt - 1, 0), 11), 30 * 60_000);
+  return computeBackoff({ initialMs: 1_000, maxMs: 30 * 60_000, factor: 2, jitter: 0.2 }, attempt);
 }
 
 async function waitForRetry(signal: AbortSignal | undefined, delayMs: number): Promise<boolean> {
-  if (signal?.aborted) {
+  try {
+    await sleepWithAbort(delayMs, signal);
+    return !signal?.aborted;
+  } catch {
     return false;
   }
-  return await new Promise<boolean>((resolve) => {
-    const timer = setTimeout(() => {
-      signal?.removeEventListener("abort", onAbort);
-      resolve(true);
-    }, delayMs);
-    const onAbort = () => {
-      clearTimeout(timer);
-      resolve(false);
-    };
-    signal?.addEventListener("abort", onAbort, { once: true });
-  });
 }
 
 function errorText(error: unknown): string {
@@ -60,6 +56,7 @@ export async function processAgentMailIngress(params: {
   dispatch: AgentMailIngressDispatch;
   abortSignal?: AbortSignal;
   retryDelayMs?: (attempt: number) => number;
+  maxDispatchAttempts?: number;
 }): Promise<"accepted" | "duplicate"> {
   const id = createAgentMailDurableInboundId(params.record);
   const accepted = await params.journal.accept(id, params.record, {
@@ -68,14 +65,9 @@ export async function processAgentMailIngress(params: {
   if (accepted.kind === "completed") {
     return "duplicate";
   }
-  // A zero-attempt pending row is still owned by the first live delivery. Released rows carry an
-  // attempt count and can safely wake the same in-process retry worker.
-  if (accepted.kind === "pending" && accepted.record.attempts === 0) {
-    return "duplicate";
-  }
   const record = accepted.kind === "pending" ? accepted.record.payload : params.record;
-  // Webhook acknowledgement is gated only on the durable accept above. Processing continues from
-  // the queue; one worker per durable id retries released rows without needing provider redelivery.
+  // Pending duplicates also register as successors. This closes the account-reload race where a
+  // replacement replay ran just before the old account admitted its final live event.
   scheduleAgentMailIngressDispatch({
     journal: params.journal,
     id,
@@ -84,6 +76,7 @@ export async function processAgentMailIngress(params: {
     abortSignal: params.abortSignal,
     retryDelay: params.retryDelayMs,
     initialAttempts: accepted.kind === "pending" ? accepted.record.attempts : 0,
+    maxDispatchAttempts: params.maxDispatchAttempts ?? AGENTMAIL_INGRESS_MAX_DISPATCH_ATTEMPTS,
   });
   return "accepted";
 }
@@ -111,6 +104,36 @@ function scheduleAgentMailIngressDispatch(params: DispatchParams): void {
     }
   };
   void active.task.then(finish, () => finish(false));
+}
+
+async function failAgentMailIngressUntilSettled(params: {
+  journal: AgentMailJournal;
+  id: string;
+  lastError: string;
+  abortSignal?: AbortSignal;
+  retryDelay: (attempt: number) => number;
+  attempts: number;
+}): Promise<boolean> {
+  const fail = params.journal.fail;
+  if (!fail) {
+    throw new Error("AgentMail durable ingress requires terminal-failure journal support");
+  }
+  let markerAttempts = params.attempts;
+  while (!params.abortSignal?.aborted) {
+    try {
+      await fail(params.id, {
+        reason: "dispatch_attempts_exhausted",
+        message: params.lastError,
+      });
+      return true;
+    } catch {
+      markerAttempts += 1;
+      if (!(await waitForRetry(params.abortSignal, params.retryDelay(markerAttempts)))) {
+        return false;
+      }
+    }
+  }
+  return false;
 }
 
 async function dispatchAgentMailIngressUntilSettled(params: DispatchParams): Promise<boolean> {
@@ -143,6 +166,18 @@ async function dispatchAgentMailIngressUntilSettled(params: DispatchParams): Pro
         }
         attempts += 1;
         const lastError = errorText(error);
+        if (attempts >= params.maxDispatchAttempts) {
+          // Stop poison work from refreshing its pending TTL forever. The failed tombstone keeps
+          // transport redelivery deduplicated while freeing admission capacity for later mail.
+          return await failAgentMailIngressUntilSettled({
+            journal: params.journal,
+            id: params.id,
+            lastError,
+            abortSignal: params.abortSignal,
+            retryDelay: params.retryDelay ?? retryDelayMs,
+            attempts,
+          });
+        }
         while (!params.abortSignal?.aborted) {
           try {
             const released = await params.journal.release(params.id, { lastError });
@@ -153,7 +188,6 @@ async function dispatchAgentMailIngressUntilSettled(params: DispatchParams): Pro
             }
             break;
           } catch {
-            attempts += 1;
             if (
               !(await waitForRetry(
                 params.abortSignal,
@@ -201,6 +235,7 @@ export async function replayPendingAgentMailIngress(params: {
   dispatch: AgentMailIngressDispatch;
   abortSignal?: AbortSignal;
   retryDelayMs?: (attempt: number) => number;
+  maxDispatchAttempts?: number;
 }): Promise<void> {
   for (const pending of await params.journal.pending()) {
     scheduleAgentMailIngressDispatch({
@@ -211,6 +246,7 @@ export async function replayPendingAgentMailIngress(params: {
       abortSignal: params.abortSignal,
       retryDelay: params.retryDelayMs,
       initialAttempts: pending.attempts,
+      maxDispatchAttempts: params.maxDispatchAttempts ?? AGENTMAIL_INGRESS_MAX_DISPATCH_ATTEMPTS,
     });
   }
 }

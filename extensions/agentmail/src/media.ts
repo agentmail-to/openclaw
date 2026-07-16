@@ -1,4 +1,3 @@
-import { basename } from "node:path";
 import type { AgentMail, AgentMailClient } from "agentmail";
 import { normalizeMimeType } from "openclaw/plugin-sdk/media-mime";
 import { saveMediaBuffer } from "openclaw/plugin-sdk/media-store";
@@ -6,6 +5,7 @@ import {
   loadOutboundMediaFromUrl,
   type OutboundMediaLoadOptions,
 } from "openclaw/plugin-sdk/outbound-media";
+import { sanitizeUntrustedFileName } from "openclaw/plugin-sdk/security-runtime";
 import { MediaFetchError, loadWebMediaRaw } from "openclaw/plugin-sdk/web-media";
 
 export type AgentMailInboundMedia = {
@@ -14,18 +14,6 @@ export type AgentMailInboundMedia = {
 };
 
 export class AgentMailMediaPolicyError extends Error {}
-
-function sanitizeFilename(value: string | undefined, fallback: string): string {
-  let printable = "";
-  for (const character of value ?? "") {
-    const code = character.codePointAt(0) ?? 0;
-    if (code >= 32 && code !== 127) {
-      printable += character;
-    }
-  }
-  const clean = basename(printable).trim();
-  return clean || fallback;
-}
 
 function isAcceptedAttachment(attachment: AgentMail.Attachment): boolean {
   return attachment.contentDisposition !== "inline" && !attachment.contentId;
@@ -92,7 +80,8 @@ export async function loadAgentMailInboundAttachments(params: {
       buffer: loaded.buffer,
       contentType:
         normalizeMimeType(metadata.contentType ?? loaded.contentType) ?? "application/octet-stream",
-      filename: sanitizeFilename(metadata.filename, `attachment-${attachment.attachmentId}`),
+      // saveMediaBuffer owns inbound filename sanitization at the persistence boundary.
+      filename: metadata.filename || `attachment-${attachment.attachmentId}`,
     });
   }
 
@@ -135,7 +124,7 @@ export async function loadAgentMailOutboundAttachments(params: {
       throw new Error("AgentMail outbound attachments exceed the configured aggregate media limit");
     }
     attachments.push({
-      filename: sanitizeFilename(loaded.fileName, `attachment-${index + 1}`),
+      filename: sanitizeUntrustedFileName(loaded.fileName ?? "", `attachment-${index + 1}`),
       contentType: normalizeMimeType(loaded.contentType) ?? "application/octet-stream",
       contentDisposition: "attachment",
       content: loaded.buffer.toString("base64"),

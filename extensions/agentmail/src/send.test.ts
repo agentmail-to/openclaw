@@ -7,9 +7,8 @@ import {
 } from "./send.js";
 
 const reply = vi.fn(async () => ({ messageId: "reply_1", threadId: "thread_1" }));
-
-vi.mock("./media.js", () => ({
-  loadAgentMailOutboundAttachments: vi.fn(async () => [
+const loadAgentMailOutboundAttachments = vi.hoisted(() =>
+  vi.fn(async () => [
     {
       filename: "proof.txt",
       contentType: "text/plain",
@@ -17,6 +16,10 @@ vi.mock("./media.js", () => ({
       content: "cHJvb2Y=",
     },
   ]),
+);
+
+vi.mock("./media.js", () => ({
+  loadAgentMailOutboundAttachments,
 }));
 
 describe("AgentMail reply-only outbound", () => {
@@ -126,6 +129,9 @@ describe("AgentMail reply-only outbound", () => {
 
   it("reconciles an unknown send with the same queue-derived idempotency key", async () => {
     reply.mockClear();
+    loadAgentMailOutboundAttachments.mockClear();
+    const now = 10_000;
+    const mediaReadFile = vi.fn(async () => Buffer.from("proof"));
     const result = await reconcileAgentMailUnknownSend(
       {
         cfg: { channels: { agentmail: { apiKey: "key", inboxId: "inbox_1" } } },
@@ -133,20 +139,60 @@ describe("AgentMail reply-only outbound", () => {
         channel: "agentmail",
         to: "message:msg_1",
         accountId: "default",
-        enqueuedAt: 1,
+        enqueuedAt: now - 1_000,
         retryCount: 1,
         effectiveReplyToId: "msg_1",
-        payloads: [{ text: "Hello" }],
+        payloads: [{ text: "Hello", mediaUrls: ["file:///proof.txt"] }],
+        mediaAccess: { localRoots: ["/"] },
+        mediaLocalRoots: ["/"],
+        mediaReadFile,
       },
-      { client: { inboxes: { messages: { reply } } } as never },
+      { client: { inboxes: { messages: { reply } } } as never, now: () => now },
     );
     expect(result.status).toBe("sent");
+    expect(loadAgentMailOutboundAttachments).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mediaAccess: { localRoots: ["/"] },
+        mediaLocalRoots: ["/"],
+        mediaReadFile,
+      }),
+    );
     expect(reply.mock.calls[0]?.[3]).toEqual({
       idempotencyKey: expect.stringMatching(/^openclaw-agentmail-[a-f0-9]{64}$/u),
     });
   });
 
+  it("fails closed before AgentMail's idempotency key can expire", async () => {
+    reply.mockClear();
+    loadAgentMailOutboundAttachments.mockClear();
+    const now = 24 * 60 * 60 * 1000;
+    const result = await reconcileAgentMailUnknownSend(
+      {
+        cfg: { channels: { agentmail: { apiKey: "key", inboxId: "inbox_1" } } },
+        queueId: "queue_1",
+        channel: "agentmail",
+        to: "message:msg_1",
+        accountId: "default",
+        enqueuedAt: 0,
+        platformSendStartedAt: 60 * 60 * 1000,
+        retryCount: 1,
+        effectiveReplyToId: "msg_1",
+        payloads: [{ text: "Hello" }],
+      },
+      { client: { inboxes: { messages: { reply } } } as never, now: () => now },
+    );
+
+    expect(result).toEqual({
+      status: "unresolved",
+      error: "AgentMail recovery is too close to the provider idempotency-key expiry",
+      retryable: false,
+    });
+    expect(reply).not.toHaveBeenCalled();
+    expect(loadAgentMailOutboundAttachments).not.toHaveBeenCalled();
+  });
+
   it("refuses recovery when the persisted reply target differs", async () => {
+    const now = 10_000;
     const result = await reconcileAgentMailUnknownSend(
       {
         cfg: { channels: { agentmail: { apiKey: "key", inboxId: "inbox_1" } } },
@@ -154,12 +200,12 @@ describe("AgentMail reply-only outbound", () => {
         channel: "agentmail",
         to: "message:msg_b",
         accountId: "default",
-        enqueuedAt: 1,
+        enqueuedAt: now - 1_000,
         retryCount: 1,
         effectiveReplyToId: "msg_a",
         payloads: [{ text: "Hello" }],
       },
-      { client: { inboxes: { messages: { reply } } } as never },
+      { client: { inboxes: { messages: { reply } } } as never, now: () => now },
     );
     expect(result).toEqual({
       status: "unresolved",

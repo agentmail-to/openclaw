@@ -82,6 +82,17 @@ type DurableInboundReceiveQueueJournalOptions<TPayload, TMetadata, TCompletedMet
   retention?: ChannelIngressQueuePruneOptions;
 };
 
+/** Raised when durable ingress cannot admit a new id without evicting accepted pending work. */
+export class DurableInboundReceiveCapacityError extends Error {
+  readonly maxPendingEntries: number;
+
+  constructor(maxPendingEntries: number) {
+    super(`Durable inbound receive queue is full (${maxPendingEntries} pending entries)`);
+    this.name = "DurableInboundReceiveCapacityError";
+    this.maxPendingEntries = maxPendingEntries;
+  }
+}
+
 function normalizeDurableInboundReceiveId(id: string): string {
   const normalized = id.trim();
   if (!normalized) {
@@ -98,10 +109,15 @@ export function createDurableInboundReceiveJournalFromQueue<
 >(
   options: DurableInboundReceiveQueueJournalOptions<TPayload, TMetadata, TCompletedMetadata>,
 ): DurableInboundReceiveJournal<TPayload, TMetadata, TCompletedMetadata> {
+  const pendingMaxEntries = options.retention?.pendingMaxEntries;
+  const pruneRetention = options.retention ? { ...options.retention } : undefined;
+  if (pruneRetention) {
+    delete pruneRetention.pendingMaxEntries;
+  }
   const prune = async (protectId?: string) => {
-    if (options.retention) {
+    if (pruneRetention) {
       await options.queue.prune({
-        ...options.retention,
+        ...pruneRetention,
         ...(protectId === undefined ? {} : { protectIds: [protectId] }),
       });
     }
@@ -114,7 +130,11 @@ export function createDurableInboundReceiveJournalFromQueue<
         ...(acceptOptions?.receivedAt === undefined
           ? {}
           : { receivedAt: acceptOptions.receivedAt }),
+        ...(pendingMaxEntries === undefined ? {} : { maxPendingEntries: pendingMaxEntries }),
       });
+      if (result.kind === "capacity") {
+        throw new DurableInboundReceiveCapacityError(result.maxPendingEntries);
+      }
       await prune(normalizeDurableInboundReceiveId(id));
       if (result.kind === "accepted") {
         return { kind: "accepted", duplicate: false, record: result.record };

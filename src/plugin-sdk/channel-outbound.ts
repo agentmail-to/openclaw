@@ -106,6 +106,7 @@ export type { ChannelProgressDraftCompositorLine } from "../channels/progress-dr
 export {
   createChannelMessageAdapterFromOutbound,
   createDurableInboundReceiveJournalFromQueue,
+  DurableInboundReceiveCapacityError,
   createMessageReceiptFromOutboundResults,
   listMessageReceiptPlatformIds,
   createMessageReceiveContext,

@@ -11,6 +11,9 @@ import { createAgentMailClient } from "./client.js";
 import { loadAgentMailOutboundAttachments } from "./media.js";
 
 const TARGET_PREFIX = "message:";
+// AgentMail expires idempotency keys 24 hours after a completed send. Stop one hour early because
+// an unknown completion time cannot safely prove that another retry will still reuse the key.
+const AGENTMAIL_UNKNOWN_SEND_MAX_AGE_MS = 23 * 60 * 60 * 1000;
 
 export function normalizeAgentMailTarget(value: string | null | undefined): string | null {
   const target = value?.trim();
@@ -151,7 +154,7 @@ export async function sendAgentMailReply(
  */
 export async function reconcileAgentMailUnknownSend(
   ctx: ChannelMessageUnknownSendContext,
-  options: { client?: AgentMailClient } = {},
+  options: { client?: AgentMailClient; now?: () => number } = {},
 ): Promise<ChannelMessageUnknownSendReconciliationResult> {
   if (ctx.payloads.length !== 1 || (ctx.renderedBatchPlan?.items.length ?? 1) !== 1) {
     return {
@@ -173,6 +176,15 @@ export async function reconcileAgentMailUnknownSend(
       retryable: false,
     };
   }
+  const recoveryReferenceAt = ctx.platformSendStartedAt ?? ctx.enqueuedAt;
+  const recoveryAgeMs = Math.max(0, (options.now?.() ?? Date.now()) - recoveryReferenceAt);
+  if (recoveryAgeMs >= AGENTMAIL_UNKNOWN_SEND_MAX_AGE_MS) {
+    return {
+      status: "unresolved",
+      error: "AgentMail recovery is too close to the provider idempotency-key expiry",
+      retryable: false,
+    };
+  }
   const mediaUrls = rendered?.mediaUrls.length
     ? [...rendered.mediaUrls]
     : [payload.mediaUrl, ...(payload.mediaUrls ?? [])].filter((value): value is string =>
@@ -191,6 +203,9 @@ export async function reconcileAgentMailUnknownSend(
         text,
         ...(mediaUrls.length > 0 ? { mediaUrls } : {}),
       },
+      ...(ctx.mediaAccess ? { mediaAccess: ctx.mediaAccess } : {}),
+      ...(ctx.mediaLocalRoots ? { mediaLocalRoots: ctx.mediaLocalRoots } : {}),
+      ...(ctx.mediaReadFile ? { mediaReadFile: ctx.mediaReadFile } : {}),
     },
     triggeringMessageId,
     options,

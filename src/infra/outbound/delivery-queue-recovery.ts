@@ -9,6 +9,7 @@ import type {
   ChannelMessageUnknownSendReconciliationResult,
 } from "../../channels/message/types.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
+import { resolveAgentScopedOutboundMediaAccess } from "../../media/read-capability.js";
 import {
   claimRecoveryEntry as claimSharedRecoveryEntry,
   computeBackoffMs,
@@ -270,6 +271,32 @@ async function reconcileUnknownQueuedDelivery(opts: {
   }
   const { entry } = opts;
   try {
+    // Unknown-send reconciliation runs before normal recovery delivery. Rebuild the same
+    // session-scoped media capability here so a provider retry cannot bypass or lose local media.
+    const persistedMediaSources = entry.renderedBatchPlan
+      ? entry.renderedBatchPlan.items.flatMap((item) => item.mediaUrls)
+      : entry.payloads.flatMap((payload) => [
+          ...(payload.mediaUrl ? [payload.mediaUrl] : []),
+          ...(payload.mediaUrls ?? []),
+        ]);
+    const mediaSources = persistedMediaSources.filter(
+      (source, index, sources) => source.length > 0 && sources.indexOf(source) === index,
+    );
+    const mediaAccess =
+      mediaSources.length > 0
+        ? resolveAgentScopedOutboundMediaAccess({
+            cfg: opts.cfg,
+            agentId: entry.session?.agentId ?? entry.mirror?.agentId,
+            mediaSources,
+            sessionKey: entry.session?.policyKey ?? entry.session?.key,
+            messageProvider: entry.session?.key ? undefined : entry.channel,
+            accountId: entry.session?.requesterAccountId ?? entry.accountId,
+            requesterSenderId: entry.session?.requesterSenderId,
+            requesterSenderName: entry.session?.requesterSenderName,
+            requesterSenderUsername: entry.session?.requesterSenderUsername,
+            requesterSenderE164: entry.session?.requesterSenderE164,
+          })
+        : undefined;
     return await reconcileUnknownSend({
       cfg: opts.cfg,
       queueId: entry.id,
@@ -290,6 +317,13 @@ async function reconcileUnknownQueuedDelivery(opts: {
       ...(entry.replyToMode !== undefined ? { replyToMode: entry.replyToMode } : {}),
       ...(entry.threadId !== undefined ? { threadId: entry.threadId } : {}),
       ...(entry.silent !== undefined ? { silent: entry.silent } : {}),
+      ...(mediaAccess
+        ? {
+            mediaAccess,
+            ...(mediaAccess.localRoots ? { mediaLocalRoots: mediaAccess.localRoots } : {}),
+            ...(mediaAccess.readFile ? { mediaReadFile: mediaAccess.readFile } : {}),
+          }
+        : {}),
     });
   } catch (err) {
     const error = formatErrorMessage(err);

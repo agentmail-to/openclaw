@@ -4,7 +4,11 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { closeOpenClawStateDatabaseForTest } from "../../state/openclaw-state-db.js";
-import { createDurableInboundReceiveJournalFromQueue } from "./durable-receive.js";
+import {
+  createDurableInboundReceiveJournal,
+  createDurableInboundReceiveJournalFromQueue,
+  DurableInboundReceiveCapacityError,
+} from "./durable-receive.js";
 import { createChannelIngressQueue } from "./ingress-queue.js";
 
 type TestPayload = { body: string };
@@ -84,6 +88,36 @@ describe("createDurableInboundReceiveJournalFromQueue", () => {
       await expect(journal.accept("message-1", { body: "past retention" })).resolves.toMatchObject({
         kind: "accepted",
         duplicate: false,
+      });
+    });
+  });
+
+  it("rejects new ingress at capacity without evicting accepted pending work", async () => {
+    await withTempState(async (stateDir) => {
+      const queue = createChannelIngressQueue<TestPayload>({
+        channelId: "test",
+        accountId: "account",
+        stateDir,
+        now: () => 10,
+      });
+      const journal = createDurableInboundReceiveJournalFromQueue({
+        queue,
+        retention: { pendingMaxEntries: 1 },
+      });
+
+      await expect(journal.accept("message-1", { body: "first" })).resolves.toMatchObject({
+        kind: "accepted",
+      });
+      await expect(journal.accept("message-2", { body: "second" })).rejects.toBeInstanceOf(
+        DurableInboundReceiveCapacityError,
+      );
+      await expect(journal.pending()).resolves.toMatchObject([
+        { id: "message-1", payload: { body: "first" } },
+      ]);
+      await expect(journal.accept("message-1", { body: "duplicate" })).resolves.toMatchObject({
+        kind: "pending",
+        duplicate: true,
+        record: { payload: { body: "first" } },
       });
     });
   });

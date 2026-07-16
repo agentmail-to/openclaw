@@ -871,6 +871,43 @@ describe("delivery-queue recovery", () => {
     });
   });
 
+  it("reconstructs local-media access before unknown-send reconciliation", async () => {
+    const mediaPath = path.join(tmpDir(), "workspace", "proof.txt");
+    const id = await enqueueDelivery(
+      {
+        channel: "demo-channel-a",
+        to: "+1",
+        payloads: [{ text: "maybe sent", mediaUrls: [mediaPath] }],
+        session: { key: "agent:main:main", agentId: "main" },
+      },
+      tmpDir(),
+    );
+    await markDeliveryPlatformSendAttemptStarted(id, tmpDir());
+    const reconcileUnknownSend = vi.fn().mockResolvedValue({
+      status: "sent",
+      receipt: {
+        platformMessageIds: ["platform-media-1"],
+        parts: [{ platformMessageId: "platform-media-1", kind: "media", index: 0 }],
+        sentAt: 1,
+      },
+    });
+    resolveOutboundChannelMessageAdapterMock.mockReturnValue({
+      durableFinal: {
+        capabilities: { reconcileUnknownSend: true },
+        reconcileUnknownSend,
+      },
+    });
+
+    await runRecovery({ deliver: vi.fn().mockResolvedValue([]) });
+
+    expect(reconcileUnknownSend).toHaveBeenCalledOnce();
+    expect(mockCallArg(reconcileUnknownSend)).toMatchObject({
+      mediaAccess: { localRoots: expect.any(Array) },
+      mediaLocalRoots: expect.any(Array),
+      mediaReadFile: expect.any(Function),
+    });
+  });
+
   it("moves unknown-after-send entries to failed when adapter reports not sent", async () => {
     const id = await enqueueDelivery(
       { channel: "demo-channel-a", to: "+1", payloads: [{ text: "not sent" }] },

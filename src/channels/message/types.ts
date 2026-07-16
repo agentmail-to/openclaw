@@ -291,6 +291,10 @@ export type ChannelMessageUnknownSendContext<TConfig = OpenClawConfig> = {
   replyToMode?: ReplyToMode;
   threadId?: string | number | null;
   silent?: boolean;
+  /** Reconstructed media capability for replaying an uncertain local-media send. */
+  mediaAccess?: OutboundMediaAccess;
+  mediaLocalRoots?: readonly string[];
+  mediaReadFile?: (filePath: string) => Promise<Buffer>;
 };
 
 /** Adapter verdict for whether an unknown queued send reached the platform. */
@@ -343,6 +347,11 @@ type ChannelMessageSendAdapter<
   TConfig = OpenClawConfig,
   TSendResult extends ChannelMessageSendResult = ChannelMessageSendResult,
 > = {
+  /**
+   * Route an ordinary media-bearing reply payload through `payload` exactly once.
+   * Use this when the native transport sends text plus all attachments atomically.
+   */
+  atomicMediaPayloads?: boolean;
   text?: (ctx: ChannelMessageSendTextContext<TConfig>) => Promise<TSendResult>;
   media?: (ctx: ChannelMessageSendMediaContext<TConfig>) => Promise<TSendResult>;
   payload?: (ctx: ChannelMessageSendPayloadContext<TConfig>) => Promise<TSendResult>;

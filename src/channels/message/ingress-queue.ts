@@ -130,6 +130,11 @@ type ChannelIngressQueueEnqueueResult<TPayload, TMetadata, TCompletedMetadata> =
       kind: "failed";
       duplicate: true;
       record: ChannelIngressQueueFailedRecord;
+    }
+  | {
+      kind: "capacity";
+      duplicate: false;
+      maxPendingEntries: number;
     };
 
 /** Durable FIFO-ish ingress queue with claims, duplicate detection, and retention pruning. */
@@ -141,6 +146,8 @@ export type ChannelIngressQueue<TPayload, TMetadata = unknown, TCompletedMetadat
       metadata?: TMetadata;
       receivedAt?: number;
       laneKey?: string;
+      /** Reject a new id atomically when this many pending rows already exist. */
+      maxPendingEntries?: number;
     },
   ): Promise<ChannelIngressQueueEnqueueResult<TPayload, TMetadata, TCompletedMetadata>>;
   listPending(options?: {
@@ -469,10 +476,29 @@ export function createChannelIngressQueue<
     }
     const receivedAt = enqueueOptions?.receivedAt ?? now();
     const updatedAt = now();
+    const maxPendingEntries = normalizeMaxEntries(enqueueOptions?.maxPendingEntries);
     const database = openStateDatabase(options.stateDir);
     return runOpenClawStateWriteTransaction(
       (tx) => {
         const kysely = getChannelIngressKysely(tx.db);
+        const existing = selectRow(tx.db, queueName, eventId);
+        if (existing === undefined && maxPendingEntries !== null) {
+          const countRow = executeSqliteQueryTakeFirstSync(
+            tx.db,
+            kysely
+              .selectFrom("channel_ingress_events")
+              .select((eb) => eb.fn.countAll<number | bigint>().as("count"))
+              .where("queue_name", "=", queueName)
+              .where("status", "=", "pending"),
+          );
+          if (Number(countRow?.count ?? 0) >= maxPendingEntries) {
+            return {
+              kind: "capacity",
+              duplicate: false,
+              maxPendingEntries,
+            };
+          }
+        }
         const insert = executeSqliteQuerySync(
           tx.db,
           kysely

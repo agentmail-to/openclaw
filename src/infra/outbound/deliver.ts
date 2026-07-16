@@ -159,6 +159,7 @@ type ChannelHandler = {
   chunkedTextFormatting?: OutboundDeliveryFormattingOptions;
   textChunkLimit?: number;
   supportsMedia: boolean;
+  atomicMediaPayloads: boolean;
   sanitizeText?: (payload: ReplyPayload) => string;
   normalizePayload?: (payload: ReplyPayload) => ReplyPayload | null;
   sendTextOnlyErrorPayloads?: boolean;
@@ -437,6 +438,7 @@ function createPluginHandler(
     chunkedTextFormatting: outbound?.chunkedTextFormatting,
     textChunkLimit: outbound?.textChunkLimit,
     supportsMedia: Boolean(messageMedia ?? sendMedia),
+    atomicMediaPayloads: params.message?.send?.atomicMediaPayloads === true,
     sanitizeText: outbound?.sanitizeText
       ? (payload) =>
           outbound.sanitizeText!({
@@ -2348,7 +2350,8 @@ async function deliverOutboundPayloadsCore(
       const deliveryTarget = deliveryHandler.buildTargetRef({ threadId: sendOverrides.threadId });
       if (
         deliveryHandler.sendPayload &&
-        ((effectivePayload.isError === true &&
+        ((payloadSummary.mediaUrls.length > 0 && deliveryHandler.atomicMediaPayloads) ||
+          (effectivePayload.isError === true &&
           deliveryHandler.sendTextOnlyErrorPayloads === true) ||
           hasReplyPayloadContent(
             {

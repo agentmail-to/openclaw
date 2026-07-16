@@ -3,7 +3,11 @@
 export { deriveDurableFinalDeliveryRequirements } from "./capabilities.js";
 export { defineChannelMessageAdapter } from "./adapter.js";
 export { createChannelMessageAdapterFromOutbound } from "./outbound-bridge.js";
-export { createDurableInboundReceiveJournalFromQueue } from "./durable-receive.js";
+export {
+  createDurableInboundReceiveJournal,
+  createDurableInboundReceiveJournalFromQueue,
+  DurableInboundReceiveCapacityError,
+} from "./durable-receive.js";
 
 export {
   verifyChannelMessageAdapterCapabilityProofs,

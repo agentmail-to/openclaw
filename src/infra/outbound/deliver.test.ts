@@ -11,6 +11,7 @@ import { chunkText } from "../../auto-reply/chunk.js";
 import { createMessageReceiptFromOutboundResults } from "../../channels/message/receipt.js";
 import type {
   ChannelMessageSendMediaContext,
+  ChannelMessageSendPayloadContext,
   ChannelMessageSendTextContext,
 } from "../../channels/message/types.js";
 import type { ChannelOutboundAdapter } from "../../channels/plugins/types.public.js";
@@ -1050,6 +1051,64 @@ describe("deliverOutboundPayloads", () => {
       }),
     ).resolves.toHaveLength(1);
     expect(messageSendMedia).toHaveBeenCalledOnce();
+  });
+
+  it("routes all ordinary media through one atomic payload adapter call", async () => {
+    const sendText = vi.fn();
+    const sendPayload = vi.fn(async (_ctx: ChannelMessageSendPayloadContext) => ({
+      messageId: "atomic-1",
+      receipt: createMessageReceiptFromOutboundResults({
+        results: [{ channel: "matrix", messageId: "atomic-1" }],
+        kind: "media",
+      }),
+    }));
+    setActivePluginRegistry(
+      createTestRegistry([
+        {
+          pluginId: "matrix",
+          source: "test",
+          plugin: {
+            id: "matrix",
+            message: {
+              id: "matrix",
+              durableFinal: {
+                capabilities: { text: true, media: true, payload: true },
+              },
+              send: {
+                atomicMediaPayloads: true,
+                text: sendText,
+                payload: sendPayload,
+              },
+            },
+          },
+        },
+      ]),
+    );
+
+    await expect(
+      deliverOutboundPayloads({
+        cfg: {},
+        channel: "matrix",
+        to: "!room:example",
+        payloads: [
+          {
+            text: "caption",
+            mediaUrls: ["https://example.com/first.png", "https://example.com/second.png"],
+          },
+        ],
+        skipQueue: true,
+      }),
+    ).resolves.toHaveLength(1);
+
+    expect(sendText).not.toHaveBeenCalled();
+    expect(sendPayload).toHaveBeenCalledOnce();
+    expect(sendPayload.mock.calls[0]?.[0]).toMatchObject({
+      text: "caption",
+      payload: {
+        text: "caption",
+        mediaUrls: ["https://example.com/first.png", "https://example.com/second.png"],
+      },
+    });
   });
 
   it("passes stable part indexes to exact multi-media sends", async () => {

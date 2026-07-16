@@ -1,7 +1,13 @@
 import type { AgentMailClient } from "agentmail";
-import { describe, expectTypeOf, it } from "vitest";
+import { describe, expect, expectTypeOf, it } from "vitest";
+import { agentMailPlugin } from "./channel.js";
 
 describe("agentmail@0.5.16 SDK positional contract", () => {
+  it("declares one atomic payload send for ordinary outbound attachments", () => {
+    expect(agentMailPlugin.message?.send?.atomicMediaPayloads).toBe(true);
+    expect(agentMailPlugin.message?.send?.payload).toEqual(expect.any(Function));
+  });
+
   it("keeps message and attachment identifiers positional", () => {
     type Messages = AgentMailClient["inboxes"]["messages"];
     type Attachment = Awaited<ReturnType<Messages["getAttachment"]>>;

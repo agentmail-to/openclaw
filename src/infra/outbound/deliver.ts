@@ -80,6 +80,7 @@ import {
   markDeliveryPlatformOutcomeUnknown,
   markDeliveryPlatformSendDispatched,
   markDeliveryPlatformSendAttemptStarted,
+  saveDeliveryPlatformSendPayload,
   type QueuedReplyPayloadSendingHook,
   type QueuedRenderedMessageBatchPlan,
   withActiveDeliveryClaim,
@@ -159,6 +160,7 @@ type ChannelHandler = {
   chunkedTextFormatting?: OutboundDeliveryFormattingOptions;
   textChunkLimit?: number;
   supportsMedia: boolean;
+  mediaPayloadMode?: "atomic";
   sanitizeText?: (payload: ReplyPayload) => string;
   normalizePayload?: (payload: ReplyPayload) => ReplyPayload | null;
   sendTextOnlyErrorPayloads?: boolean;
@@ -203,9 +205,27 @@ type ChannelHandler = {
 };
 
 type PlatformSendRoute = {
+  kind?: ChannelMessageSendAttemptKind;
   replyToId?: string | null;
   threadId?: string | number | null;
+  text?: string;
+  mediaUrl?: string;
+  payload?: ReplyPayload;
+  audioAsVoice?: boolean;
+  /** This route represents the complete durable intent, not one part of a fan-out. */
+  durablePayloadScope?: "complete";
 };
+
+function resolvePlatformSendPayload(route: PlatformSendRoute): ReplyPayload {
+  if (route.payload) {
+    return route.payload;
+  }
+  return {
+    ...(route.text !== undefined ? { text: route.text } : {}),
+    ...(route.mediaUrl !== undefined ? { mediaUrl: route.mediaUrl } : {}),
+    ...(route.audioAsVoice === true ? { audioAsVoice: true } : {}),
+  };
+}
 
 type ChannelHandlerParams = {
   cfg: OpenClawConfig;
@@ -437,6 +457,7 @@ function createPluginHandler(
     chunkedTextFormatting: outbound?.chunkedTextFormatting,
     textChunkLimit: outbound?.textChunkLimit,
     supportsMedia: Boolean(messageMedia ?? sendMedia),
+    mediaPayloadMode: params.message?.send?.mediaPayloadMode,
     sanitizeText: outbound?.sanitizeText
       ? (payload) =>
           outbound.sanitizeText!({
@@ -514,6 +535,7 @@ function createPluginHandler(
               text: payload.text ?? "",
               mediaUrl: payload.mediaUrl,
               payload,
+              durablePayloadScope: "complete" as const,
             };
             assertUnknownSendReconciliationKind("payload");
             if (messagePayload) {
@@ -542,7 +564,9 @@ function createPluginHandler(
       ? async (text, overrides) => {
           const formattedCtx = {
             ...resolveCtx(overrides),
+            kind: "text" as const satisfies ChannelMessageSendAttemptKind,
             text,
+            durablePayloadScope: "complete" as const,
           };
           assertUnknownSendReconciliationKind("text");
           await params.onPlatformSendStart?.(formattedCtx);
@@ -566,6 +590,7 @@ function createPluginHandler(
         ...resolveCtx(overrides),
         kind: "text" as const satisfies ChannelMessageSendAttemptKind,
         text,
+        ...(!chunker ? { durablePayloadScope: "complete" as const } : {}),
       };
       assertUnknownSendReconciliationKind("text");
       if (messageText) {
@@ -1605,7 +1630,20 @@ async function deliverOutboundPayloadsWithQueueCleanup(
     requiredUnknownSendReconciliation: exactReconciliationRequired,
     onPlatformSendStart: async (route) => {
       platformSendRoute = route;
-      if (platformQueueId && !exactReconciliationRequired && queuedPreSendState === undefined) {
+      if (
+        platformQueueId &&
+        exactReconciliationRequired &&
+        route.durablePayloadScope === "complete"
+      ) {
+        // Recovery must repeat the final post-hook content. Persist it separately so a
+        // proven-not-sent retry can still replay the original payload through current hooks.
+        await saveDeliveryPlatformSendPayload(
+          platformQueueId,
+          resolvePlatformSendPayload(route),
+          platformQueueStateDir,
+          route.kind,
+        );
+      } else if (platformQueueId && queuedPreSendState === undefined) {
         queuedPreSendState = await persistQueuedPreSendState({
           queueId: platformQueueId,
           queuePolicy: platformQueuePolicy,
@@ -2348,8 +2386,9 @@ async function deliverOutboundPayloadsCore(
       const deliveryTarget = deliveryHandler.buildTargetRef({ threadId: sendOverrides.threadId });
       if (
         deliveryHandler.sendPayload &&
-        ((effectivePayload.isError === true &&
-          deliveryHandler.sendTextOnlyErrorPayloads === true) ||
+        ((payloadSummary.mediaUrls.length > 0 && deliveryHandler.mediaPayloadMode === "atomic") ||
+          (effectivePayload.isError === true &&
+            deliveryHandler.sendTextOnlyErrorPayloads === true) ||
           hasReplyPayloadContent(
             {
               presentation: effectivePayload.presentation,

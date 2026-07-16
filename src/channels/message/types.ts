@@ -291,6 +291,10 @@ export type ChannelMessageUnknownSendContext<TConfig = OpenClawConfig> = {
   replyToMode?: ReplyToMode;
   threadId?: string | number | null;
   silent?: boolean;
+  /** Reconstructed media capability for replaying an uncertain local-media send. */
+  mediaAccess?: OutboundMediaAccess;
+  mediaLocalRoots?: readonly string[];
+  mediaReadFile?: (filePath: string) => Promise<Buffer>;
 };
 
 /** Adapter verdict for whether an unknown queued send reached the platform. */
@@ -339,16 +343,31 @@ export type ChannelMessageSendLifecycleAdapter<
 };
 
 /** Adapter methods a message channel can implement for outbound text/media/payload/poll sends. */
-type ChannelMessageSendAdapter<
+type ChannelMessageSendAdapterBase<
   TConfig = OpenClawConfig,
   TSendResult extends ChannelMessageSendResult = ChannelMessageSendResult,
 > = {
   text?: (ctx: ChannelMessageSendTextContext<TConfig>) => Promise<TSendResult>;
   media?: (ctx: ChannelMessageSendMediaContext<TConfig>) => Promise<TSendResult>;
-  payload?: (ctx: ChannelMessageSendPayloadContext<TConfig>) => Promise<TSendResult>;
   poll?: (ctx: ChannelMessageSendPollContext<TConfig>) => Promise<TSendResult>;
   lifecycle?: ChannelMessageSendLifecycleAdapter<TConfig, TSendResult>;
 };
+
+export type ChannelMessageSendAdapter<
+  TConfig = OpenClawConfig,
+  TSendResult extends ChannelMessageSendResult = ChannelMessageSendResult,
+> = ChannelMessageSendAdapterBase<TConfig, TSendResult> &
+  (
+    | {
+        /** Route all ordinary media in one native payload instead of media fan-out. */
+        mediaPayloadMode: "atomic";
+        payload: (ctx: ChannelMessageSendPayloadContext<TConfig>) => Promise<TSendResult>;
+      }
+    | {
+        mediaPayloadMode?: never;
+        payload?: (ctx: ChannelMessageSendPayloadContext<TConfig>) => Promise<TSendResult>;
+      }
+  );
 
 /** Durable final-delivery extension for queue reconciliation and capability declaration. */
 export type ChannelMessageDurableFinalAdapter = {

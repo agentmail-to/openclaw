@@ -21,6 +21,7 @@ import {
   markDeliveryPlatformOutcomeUnknown,
   markDeliveryPlatformSendAttemptStarted,
   recoverPendingDeliveries,
+  saveDeliveryPlatformSendPayload,
   type DeliverFn,
 } from "./delivery-queue.js";
 import {
@@ -777,6 +778,7 @@ describe("delivery-queue recovery", () => {
       },
       tmpDir(),
     );
+    await saveDeliveryPlatformSendPayload(id, { text: "final maybe sent" }, tmpDir());
     await markDeliveryPlatformSendAttemptStarted(id, tmpDir(), {
       replyToId: "hooked-root-message",
     });
@@ -836,7 +838,7 @@ describe("delivery-queue recovery", () => {
     expect(reconcileInput.channel).toBe("demo-channel-a");
     expect(reconcileInput.to).toBe("+1");
     expect(reconcileInput.accountId).toBe("acct-1");
-    expect(reconcileInput.payloads).toEqual([{ text: "maybe sent" }]);
+    expect(reconcileInput.payloads).toEqual([{ text: "final maybe sent" }]);
     expect(reconcileInput.replyToId).toBe("root-message");
     expect(reconcileInput.effectiveReplyToId).toBe("hooked-root-message");
     expect(reconcileInput.threadId).toBe("thread-1");
@@ -845,6 +847,7 @@ describe("delivery-queue recovery", () => {
 
     const afterCommitInput = mockCallArg(afterCommit) as {
       kind?: string;
+      text?: string;
       to?: string;
       accountId?: string;
       replyToId?: string;
@@ -853,6 +856,7 @@ describe("delivery-queue recovery", () => {
       result?: { messageId?: string };
     };
     expect(afterCommitInput.kind).toBe("text");
+    expect(afterCommitInput.text).toBe("final maybe sent");
     expect(afterCommitInput.to).toBe("+1");
     expect(afterCommitInput.accountId).toBe("acct-1");
     expect(afterCommitInput.replyToId).toBe("hooked-root-message");
@@ -869,6 +873,136 @@ describe("delivery-queue recovery", () => {
       messageId: "platform-1",
       resultCount: 1,
     });
+  });
+
+  it("replays an atomic provider snapshot to commit hooks as a payload", async () => {
+    const id = await enqueueDelivery(
+      {
+        channel: "demo-channel-a",
+        to: "+1",
+        payloads: [{ text: "original" }],
+      },
+      tmpDir(),
+    );
+    await saveDeliveryPlatformSendPayload(
+      id,
+      { text: "final", mediaUrls: ["file:///tmp/final.png"] },
+      tmpDir(),
+      "payload",
+    );
+    await markDeliveryPlatformSendAttemptStarted(id, tmpDir());
+    await markDeliveryPlatformOutcomeUnknown(id, tmpDir());
+    const afterCommit = vi.fn();
+    resolveOutboundChannelMessageAdapterMock.mockReturnValue({
+      durableFinal: {
+        capabilities: { reconcileUnknownSend: true },
+        reconcileUnknownSend: vi.fn().mockResolvedValue({
+          status: "sent",
+          messageId: "platform-atomic",
+          receipt: {
+            primaryPlatformMessageId: "platform-atomic",
+            platformMessageIds: ["platform-atomic"],
+            parts: [{ platformMessageId: "platform-atomic", kind: "media", index: 0 }],
+            sentAt: 1,
+          },
+        }),
+      },
+      send: { lifecycle: { afterCommit } },
+    });
+
+    await runRecovery({ deliver: vi.fn().mockResolvedValue([]) });
+
+    expect(mockCallArg(afterCommit)).toMatchObject({
+      kind: "payload",
+      text: "final",
+      payload: { text: "final", mediaUrls: ["file:///tmp/final.png"] },
+    });
+  });
+
+  it("reconstructs local-media access before unknown-send reconciliation", async () => {
+    const mediaPath = path.join(tmpDir(), "workspace", "proof.txt");
+    const id = await enqueueDelivery(
+      {
+        channel: "demo-channel-a",
+        to: "+1",
+        payloads: [{ text: "maybe sent", mediaUrls: [mediaPath] }],
+        session: { key: "agent:main:main", agentId: "main" },
+      },
+      tmpDir(),
+    );
+    await markDeliveryPlatformSendAttemptStarted(id, tmpDir());
+    const reconcileUnknownSend = vi.fn().mockResolvedValue({
+      status: "sent",
+      receipt: {
+        platformMessageIds: ["platform-media-1"],
+        parts: [{ platformMessageId: "platform-media-1", kind: "media", index: 0 }],
+        sentAt: 1,
+      },
+    });
+    resolveOutboundChannelMessageAdapterMock.mockReturnValue({
+      durableFinal: {
+        capabilities: { reconcileUnknownSend: true },
+        reconcileUnknownSend,
+      },
+    });
+
+    await runRecovery({ deliver: vi.fn().mockResolvedValue([]) });
+
+    expect(reconcileUnknownSend).toHaveBeenCalledOnce();
+    expect(mockCallArg(reconcileUnknownSend)).toMatchObject({
+      mediaAccess: { localRoots: expect.any(Array) },
+      mediaLocalRoots: expect.any(Array),
+      mediaReadFile: expect.any(Function),
+    });
+  });
+
+  it("reconciles the final provider payload while retaining the original replay payload", async () => {
+    const id = await enqueueDelivery(
+      {
+        channel: "demo-channel-a",
+        to: "+1",
+        queuePolicy: "required",
+        requireUnknownSendReconciliation: true,
+        payloads: [{ text: "secret", mediaUrls: ["file:///tmp/original.png"] }],
+      },
+      tmpDir(),
+    );
+    await saveDeliveryPlatformSendPayload(
+      id,
+      { text: "redacted", mediaUrls: ["file:///tmp/final.png"] },
+      tmpDir(),
+    );
+    await markDeliveryPlatformSendAttemptStarted(id, tmpDir());
+    const reconcileUnknownSend = vi.fn().mockResolvedValue({ status: "not_sent" });
+    resolveOutboundChannelMessageAdapterMock.mockReturnValue({
+      durableFinal: {
+        capabilities: { reconcileUnknownSend: true },
+        reconcileUnknownSend,
+      },
+    });
+    const deliver = vi.fn().mockResolvedValue([]);
+
+    await runRecovery({ deliver });
+
+    expect(mockCallArg(reconcileUnknownSend)).toMatchObject({
+      payloads: [{ text: "redacted", mediaUrls: ["file:///tmp/final.png"] }],
+      renderedBatchPlan: {
+        payloadCount: 1,
+        textCount: 1,
+        mediaCount: 1,
+        items: [
+          {
+            text: "redacted",
+            mediaUrls: ["file:///tmp/final.png"],
+          },
+        ],
+      },
+    });
+    expect(deliver).toHaveBeenCalledWith(
+      expect.objectContaining({
+        payloads: [{ text: "secret", mediaUrls: ["file:///tmp/original.png"] }],
+      }),
+    );
   });
 
   it("moves unknown-after-send entries to failed when adapter reports not sent", async () => {

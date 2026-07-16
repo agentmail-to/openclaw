@@ -4,6 +4,7 @@
 export {
   getDefaultLocalRoots,
   LocalMediaAccessError,
+  MediaSizeLimitError,
   loadWebMedia,
   loadWebMediaRaw,
   optimizeImageToJpeg,
@@ -11,3 +12,4 @@ export {
   type WebMediaResult,
 } from "../media/web-media.js";
 export type { LocalMediaAccessErrorCode } from "../media/web-media.js";
+export { MediaFetchError } from "../media/fetch.js";

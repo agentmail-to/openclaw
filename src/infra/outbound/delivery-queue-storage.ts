@@ -2,7 +2,10 @@
 // platform-send recovery state in the shared SQLite queue.
 import type { ReplyDispatchKind } from "../../auto-reply/reply/reply-dispatcher.types.js";
 import type { ReplyPayload } from "../../auto-reply/types.js";
-import type { RenderedMessageBatchPlanItem } from "../../channels/message/types.js";
+import type {
+  ChannelMessageSendAttemptKind,
+  RenderedMessageBatchPlanItem,
+} from "../../channels/message/types.js";
 import type { ReplyToMode } from "../../config/types.js";
 import type { PluginHookReplyPayloadSendingContext } from "../../plugins/hook-types.js";
 import {
@@ -91,6 +94,10 @@ export interface QueuedDelivery extends QueuedDeliveryPayload {
   /** Canonical reply target after hooks; null records an intentional root send. */
   effectiveReplyToId?: string | null;
   recoveryState?: "send_attempt_started" | "unknown_after_send";
+  /** Final post-hook payload captured before an exact-reconciliation adapter starts provider I/O. */
+  platformSendPayload?: ReplyPayload;
+  /** Adapter route that produced platformSendPayload, for exact commit-hook replay. */
+  platformSendKind?: ChannelMessageSendAttemptKind;
 }
 
 function queuedDeliveryMetadata(entry: QueuedDelivery): DeliveryQueueRowMetadata {
@@ -214,6 +221,8 @@ export async function failDeliveryBeforePlatformSend(
     // Clear both fields together; retaining either would preserve false send evidence.
     platformSendStartedAt: undefined,
     recoveryState: undefined,
+    platformSendPayload: undefined,
+    platformSendKind: undefined,
   }));
 }
 
@@ -241,6 +250,20 @@ function updateQueuedDelivery(
   updateDeliveryQueueEntry(OUTBOUND_DELIVERY_QUEUE_NAME, id, stateDir, (entry) =>
     update(entry as QueuedDelivery),
   );
+}
+
+/** Persist the exact provider-bound payload without marking recipient-visible I/O as started. */
+export async function saveDeliveryPlatformSendPayload(
+  id: string,
+  payload: ReplyPayload,
+  stateDir?: string,
+  kind?: ChannelMessageSendAttemptKind,
+): Promise<void> {
+  updateQueuedDelivery(id, stateDir, (entry) => ({
+    ...entry,
+    platformSendPayload: payload,
+    ...(kind ? { platformSendKind: kind } : {}),
+  }));
 }
 
 export async function markDeliveryPlatformSendAttemptStarted(

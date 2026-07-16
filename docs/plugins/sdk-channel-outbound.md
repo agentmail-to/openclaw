@@ -66,6 +66,13 @@ Only declare capabilities the native transport actually preserves. Cover
 each declared send, receipt, live-preview, and receive-ack capability with
 the contract helpers exported from this subpath.
 
+When a transport must create one native message containing the completed text
+and every attachment, implement `send.payload` and set
+`send.mediaPayloadMode: "atomic"`. Core then routes ordinary media-bearing
+reply payloads through that method exactly once instead of calling
+`send.media` once per URL. Keep the flag unset for transports whose native
+contract is one media send per URL.
+
 ## Plain-text sanitization
 
 Use `sanitizeForPlainText(...)` when an outbound adapter needs to convert the
@@ -143,6 +150,17 @@ Runtime send helpers also live on `channel-outbound`:
 Use `payloadOutcomes` when a batch mixes sent, suppressed, and failed
 payloads. Do not infer hook cancellation from an empty legacy
 direct-delivery result.
+
+When `durableFinal.reconcileUnknownSend(...)` receives a media-bearing queued
+intent after restart, core reconstructs `mediaAccess`, `mediaLocalRoots`, and
+`mediaReadFile` from the persisted session and rendered media sources. Pass
+those fields into the same bounded media loader used by the live send; do not
+open local paths directly during reconciliation.
+
+Bounded media loaders expose `MediaFetchError` for remote fetch limits and
+`MediaSizeLimitError` when loaded or optimized media cannot satisfy `maxBytes`.
+Use those structured errors to distinguish permanent transport-size policy
+failures from retryable I/O failures during unknown-send reconciliation.
 
 ## Deferred delivery admission
 

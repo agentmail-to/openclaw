@@ -4,11 +4,13 @@ import {
   resolveDateTimestampMs,
   resolveExpiresAtMsFromDurationMs,
 } from "@openclaw/normalization-core/number-coercion";
+import { createRenderedMessageBatchPlan } from "../../channels/message/rendered-batch.js";
 import type {
   ChannelMessageSendCommitContext,
   ChannelMessageUnknownSendReconciliationResult,
 } from "../../channels/message/types.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
+import { resolveAgentScopedOutboundMediaAccess } from "../../media/read-capability.js";
 import {
   claimRecoveryEntry as claimSharedRecoveryEntry,
   computeBackoffMs,
@@ -53,6 +55,7 @@ import {
   failedOutboundAuditTerminals,
   uniformOutboundAuditTerminals,
 } from "./outbound-audit.js";
+import { summarizeOutboundPayloadForTransport } from "./payloads.js";
 
 type RecoverySummary = {
   recovered: number;
@@ -270,6 +273,46 @@ async function reconcileUnknownQueuedDelivery(opts: {
   }
   const { entry } = opts;
   try {
+    // Exact reconciliation consumes the immutable provider-bound snapshot. The original payload
+    // remains available to normal recovery when the adapter proves the provider did not send.
+    const reconciliationPayloads = entry.platformSendPayload
+      ? [entry.platformSendPayload]
+      : entry.payloads;
+    const reconciliationRenderedBatchPlan = entry.platformSendPayload
+      ? createRenderedMessageBatchPlan([
+          {
+            ...entry.platformSendPayload,
+            mediaUrl: undefined,
+            mediaUrls: summarizeOutboundPayloadForTransport(entry.platformSendPayload).mediaUrls,
+          },
+        ])
+      : entry.renderedBatchPlan;
+    // Unknown-send reconciliation runs before normal recovery delivery. Rebuild the same
+    // session-scoped media capability here so a provider retry cannot bypass or lose local media.
+    const persistedMediaSources = reconciliationRenderedBatchPlan
+      ? reconciliationRenderedBatchPlan.items.flatMap((item) => item.mediaUrls)
+      : reconciliationPayloads.flatMap((payload) => [
+          ...(payload.mediaUrl ? [payload.mediaUrl] : []),
+          ...(payload.mediaUrls ?? []),
+        ]);
+    const mediaSources = persistedMediaSources.filter(
+      (source, index, sources) => source.length > 0 && sources.indexOf(source) === index,
+    );
+    const mediaAccess =
+      mediaSources.length > 0
+        ? resolveAgentScopedOutboundMediaAccess({
+            cfg: opts.cfg,
+            agentId: entry.session?.agentId ?? entry.mirror?.agentId,
+            mediaSources,
+            sessionKey: entry.session?.policyKey ?? entry.session?.key,
+            messageProvider: entry.session?.key ? undefined : entry.channel,
+            accountId: entry.session?.requesterAccountId ?? entry.accountId,
+            requesterSenderId: entry.session?.requesterSenderId,
+            requesterSenderName: entry.session?.requesterSenderName,
+            requesterSenderUsername: entry.session?.requesterSenderUsername,
+            requesterSenderE164: entry.session?.requesterSenderE164,
+          })
+        : undefined;
     return await reconcileUnknownSend({
       cfg: opts.cfg,
       queueId: entry.id,
@@ -284,12 +327,21 @@ async function reconcileUnknownQueuedDelivery(opts: {
       ...(entry.effectiveReplyToId !== undefined
         ? { effectiveReplyToId: entry.effectiveReplyToId }
         : {}),
-      payloads: entry.payloads,
-      ...(entry.renderedBatchPlan ? { renderedBatchPlan: entry.renderedBatchPlan } : {}),
+      payloads: reconciliationPayloads,
+      ...(reconciliationRenderedBatchPlan
+        ? { renderedBatchPlan: reconciliationRenderedBatchPlan }
+        : {}),
       ...(entry.replyToId !== undefined ? { replyToId: entry.replyToId } : {}),
       ...(entry.replyToMode !== undefined ? { replyToMode: entry.replyToMode } : {}),
       ...(entry.threadId !== undefined ? { threadId: entry.threadId } : {}),
       ...(entry.silent !== undefined ? { silent: entry.silent } : {}),
+      ...(mediaAccess
+        ? {
+            mediaAccess,
+            ...(mediaAccess.localRoots ? { mediaLocalRoots: mediaAccess.localRoots } : {}),
+            ...(mediaAccess.readFile ? { mediaReadFile: mediaAccess.readFile } : {}),
+          }
+        : {}),
     });
   } catch (err) {
     const error = formatErrorMessage(err);
@@ -318,7 +370,7 @@ function buildReconciledCommitContext(params: {
   cfg: OpenClawConfig;
   result: OutboundDeliveryResult;
 }): ChannelMessageSendCommitContext {
-  const payload = params.entry.payloads[0] ?? {};
+  const payload = params.entry.platformSendPayload ?? params.entry.payloads[0] ?? {};
   const result = {
     messageId: params.result.messageId,
     receipt: params.result.receipt ?? {
@@ -340,6 +392,15 @@ function buildReconciledCommitContext(params: {
     silent: params.entry.silent,
     result,
   };
+  if (params.entry.platformSendKind === "payload") {
+    return {
+      ...base,
+      kind: "payload",
+      text: payload.text ?? "",
+      mediaUrl: payload.mediaUrl,
+      payload,
+    };
+  }
   if (
     payload.presentation !== undefined ||
     payload.delivery !== undefined ||

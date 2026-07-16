@@ -73,6 +73,8 @@ export function createWhatsAppDurableInboundReceiveJournal(accountId: string) {
       pendingTtlMs: WHATSAPP_DURABLE_INBOUND_PENDING_TTL_MS,
       completedTtlMs: WHATSAPP_DURABLE_INBOUND_COMPLETED_TTL_MS,
       failedTtlMs: WHATSAPP_DURABLE_INBOUND_PENDING_TTL_MS,
+      // WhatsApp keeps its shipped evict-oldest retention behavior. Channels that must reject
+      // new work without eviction use the journal's separate `admission.pendingMaxEntries` seam.
       pendingMaxEntries: WHATSAPP_DURABLE_INBOUND_PENDING_MAX_ENTRIES,
       completedMaxEntries: WHATSAPP_DURABLE_INBOUND_COMPLETED_MAX_ENTRIES,
       failedMaxEntries: WHATSAPP_DURABLE_INBOUND_PENDING_MAX_ENTRIES,

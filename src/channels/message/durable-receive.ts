@@ -24,6 +24,14 @@ type DurableInboundReceiveCompletedRecord<TMetadata = unknown> = {
   metadata?: TMetadata;
 };
 
+/** Terminal failed inbound receive tombstone used to suppress unsafe replay. */
+export type DurableInboundReceiveFailedRecord = {
+  id: string;
+  failedAt: number;
+  reason: string;
+  message?: string;
+};
+
 /** Accept result for a new or duplicate inbound platform event. */
 type DurableInboundReceiveAcceptResult<TPayload, TMetadata, TCompletedMetadata> =
   | {
@@ -40,6 +48,11 @@ type DurableInboundReceiveAcceptResult<TPayload, TMetadata, TCompletedMetadata> 
       kind: "completed";
       duplicate: true;
       record: DurableInboundReceiveCompletedRecord<TCompletedMetadata>;
+    }
+  | {
+      kind: "failed";
+      duplicate: true;
+      record: DurableInboundReceiveFailedRecord;
     };
 
 /** Options recorded when accepting a pending inbound event. */
@@ -76,11 +89,31 @@ type DurableInboundReceiveJournal<TPayload, TMetadata, TCompletedMetadata> = {
   deletePending(id: string): Promise<boolean>;
 };
 
-/** Queue-backed durable receive journal options with optional retention pruning. */
-type DurableInboundReceiveQueueJournalOptions<TPayload, TMetadata, TCompletedMetadata> = {
+/** Queue-backed durable receive journal options with independent retention and admission policy. */
+export type DurableInboundReceiveQueueJournalOptions<TPayload, TMetadata, TCompletedMetadata> = {
   queue: ChannelIngressQueue<TPayload, TMetadata, TCompletedMetadata>;
   retention?: ChannelIngressQueuePruneOptions;
+  /** Reject new ids at this bound without changing retention behavior for existing callers. */
+  admission?: { pendingMaxEntries?: number };
 };
+
+/** Raised when durable ingress cannot admit a new id without evicting accepted pending work. */
+class DurableInboundReceiveCapacityError extends Error {
+  readonly maxPendingEntries: number;
+
+  constructor(maxPendingEntries: number) {
+    super(`Durable inbound receive queue is full (${maxPendingEntries} pending entries)`);
+    this.name = "DurableInboundReceiveCapacityError";
+    this.maxPendingEntries = maxPendingEntries;
+  }
+}
+
+/** Identify durable receive admission failures without exposing the internal error class. */
+export function isDurableInboundReceiveCapacityError(
+  error: unknown,
+): error is Error & { readonly maxPendingEntries: number } {
+  return error instanceof DurableInboundReceiveCapacityError;
+}
 
 function normalizeDurableInboundReceiveId(id: string): string {
   const normalized = id.trim();
@@ -114,7 +147,13 @@ export function createDurableInboundReceiveJournalFromQueue<
         ...(acceptOptions?.receivedAt === undefined
           ? {}
           : { receivedAt: acceptOptions.receivedAt }),
+        ...(options.admission?.pendingMaxEntries === undefined
+          ? {}
+          : { maxPendingEntries: options.admission.pendingMaxEntries }),
       });
+      if (result.kind === "capacity") {
+        throw new DurableInboundReceiveCapacityError(result.maxPendingEntries);
+      }
       await prune(normalizeDurableInboundReceiveId(id));
       if (result.kind === "accepted") {
         return { kind: "accepted", duplicate: false, record: result.record };
@@ -125,15 +164,16 @@ export function createDurableInboundReceiveJournalFromQueue<
       if (result.kind === "pending" || result.kind === "claimed") {
         return { kind: "pending", duplicate: true, record: result.record };
       }
+      // Queue failures represent terminal corruption or an owner-level fail decision. Preserve
+      // that state so callers do not mistake a failed event for a successfully completed one.
       return {
-        kind: "pending",
+        kind: "failed",
         duplicate: true,
         record: {
           id: result.record.id,
-          payload,
-          receivedAt: result.record.failedAt,
-          updatedAt: result.record.failedAt,
-          attempts: 0,
+          failedAt: result.record.failedAt,
+          reason: result.record.reason,
+          ...(result.record.message === undefined ? {} : { message: result.record.message }),
         },
       };
     },

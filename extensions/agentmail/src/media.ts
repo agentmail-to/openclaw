@@ -6,7 +6,11 @@ import {
   type OutboundMediaLoadOptions,
 } from "openclaw/plugin-sdk/outbound-media";
 import { sanitizeUntrustedFileName } from "openclaw/plugin-sdk/security-runtime";
-import { MediaFetchError, loadWebMediaRaw } from "openclaw/plugin-sdk/web-media";
+import {
+  MediaFetchError,
+  MediaSizeLimitError,
+  loadWebMediaRaw,
+} from "openclaw/plugin-sdk/web-media";
 
 export type AgentMailInboundMedia = {
   paths: string[];
@@ -113,15 +117,37 @@ export async function loadAgentMailOutboundAttachments(params: {
   let totalBytes = 0;
   const attachments: AgentMail.SendAttachment[] = [];
   for (const [index, mediaUrl] of params.mediaUrls.entries()) {
-    const loaded = await loadOutboundMediaFromUrl(mediaUrl, {
-      maxBytes: params.maxBytes - totalBytes,
-      mediaAccess: params.mediaAccess,
-      mediaLocalRoots: params.mediaLocalRoots,
-      mediaReadFile: params.mediaReadFile,
-    });
+    const remainingBytes = params.maxBytes - totalBytes;
+    if (remainingBytes <= 0) {
+      throw new AgentMailMediaPolicyError(
+        "AgentMail outbound attachments exceed the configured aggregate media limit",
+      );
+    }
+    let loaded;
+    try {
+      loaded = await loadOutboundMediaFromUrl(mediaUrl, {
+        maxBytes: remainingBytes,
+        mediaAccess: params.mediaAccess,
+        mediaLocalRoots: params.mediaLocalRoots,
+        mediaReadFile: params.mediaReadFile,
+      });
+    } catch (error) {
+      if (
+        error instanceof MediaSizeLimitError ||
+        (error instanceof MediaFetchError && error.code === "max_bytes")
+      ) {
+        throw new AgentMailMediaPolicyError(
+          "AgentMail outbound attachments exceed the configured aggregate media limit",
+          { cause: error },
+        );
+      }
+      throw error;
+    }
     totalBytes += loaded.buffer.byteLength;
     if (totalBytes > params.maxBytes) {
-      throw new Error("AgentMail outbound attachments exceed the configured aggregate media limit");
+      throw new AgentMailMediaPolicyError(
+        "AgentMail outbound attachments exceed the configured aggregate media limit",
+      );
     }
     attachments.push({
       filename: sanitizeUntrustedFileName(loaded.fileName ?? "", `attachment-${index + 1}`),

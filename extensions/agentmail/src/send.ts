@@ -8,12 +8,22 @@ import type {
 } from "openclaw/plugin-sdk/channel-outbound";
 import { resolveAgentMailAccount } from "./accounts.js";
 import { createAgentMailClient } from "./client.js";
-import { loadAgentMailOutboundAttachments } from "./media.js";
+import { AgentMailMediaPolicyError, loadAgentMailOutboundAttachments } from "./media.js";
 
 const TARGET_PREFIX = "message:";
 // AgentMail expires idempotency keys 24 hours after a completed send. Stop one hour early because
 // an unknown completion time cannot safely prove that another retry will still reuse the key.
 const AGENTMAIL_UNKNOWN_SEND_MAX_AGE_MS = 23 * 60 * 60 * 1000;
+
+function hasInvalidMessageIdCharacter(messageId: string): boolean {
+  for (const character of messageId) {
+    const code = character.codePointAt(0) ?? 0;
+    if (character.trim() === "" || code <= 31 || code === 127) {
+      return true;
+    }
+  }
+  return false;
+}
 
 export function normalizeAgentMailTarget(value: string | null | undefined): string | null {
   const target = value?.trim();
@@ -21,11 +31,9 @@ export function normalizeAgentMailTarget(value: string | null | undefined): stri
     return null;
   }
   const messageId = target.slice(TARGET_PREFIX.length).trim();
-  const invalid = [...messageId].some((character) => {
-    const code = character.codePointAt(0) ?? 0;
-    return character.trim() === "" || code <= 31 || code === 127;
-  });
-  return messageId && !invalid ? `${TARGET_PREFIX}${messageId}` : null;
+  return messageId && !hasInvalidMessageIdCharacter(messageId)
+    ? `${TARGET_PREFIX}${messageId}`
+    : null;
 }
 
 export function parseAgentMailMessageTarget(value: string): string {
@@ -197,20 +205,28 @@ export async function reconcileAgentMailUnknownSend(
   if (mediaUrls.length > 0) {
     recoveredPayload.mediaUrls = mediaUrls;
   }
-  const result = await sendBoundAgentMailReply(
-    {
-      cfg: ctx.cfg,
-      to: ctx.to,
-      text,
-      accountId: ctx.accountId,
-      deliveryQueueId: ctx.queueId,
-      payload: recoveredPayload,
-      ...(ctx.mediaAccess ? { mediaAccess: ctx.mediaAccess } : {}),
-      ...(ctx.mediaLocalRoots ? { mediaLocalRoots: ctx.mediaLocalRoots } : {}),
-      ...(ctx.mediaReadFile ? { mediaReadFile: ctx.mediaReadFile } : {}),
-    },
-    triggeringMessageId,
-    options,
-  );
+  let result;
+  try {
+    result = await sendBoundAgentMailReply(
+      {
+        cfg: ctx.cfg,
+        to: ctx.to,
+        text,
+        accountId: ctx.accountId,
+        deliveryQueueId: ctx.queueId,
+        payload: recoveredPayload,
+        ...(ctx.mediaAccess ? { mediaAccess: ctx.mediaAccess } : {}),
+        ...(ctx.mediaLocalRoots ? { mediaLocalRoots: ctx.mediaLocalRoots } : {}),
+        ...(ctx.mediaReadFile ? { mediaReadFile: ctx.mediaReadFile } : {}),
+      },
+      triggeringMessageId,
+      options,
+    );
+  } catch (error) {
+    if (error instanceof AgentMailMediaPolicyError) {
+      return { status: "unresolved", error: error.message, retryable: false };
+    }
+    throw error;
+  }
   return { status: "sent", messageId: result.messageId, receipt: result.receipt };
 }

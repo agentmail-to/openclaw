@@ -47,6 +47,19 @@ export type WebMediaResult = {
   fileName?: string;
 };
 
+/** Structured error raised when media cannot satisfy a caller-provided byte limit. */
+export class MediaSizeLimitError extends Error {
+  readonly maxBytes: number;
+  readonly actualBytes: number;
+
+  constructor(message: string, params: { maxBytes: number; actualBytes: number }) {
+    super(message);
+    this.name = "MediaSizeLimitError";
+    this.maxBytes = params.maxBytes;
+    this.actualBytes = params.actualBytes;
+  }
+}
+
 type WebMediaOptions = {
   maxBytes?: number;
   optimizeImages?: boolean;
@@ -354,6 +367,10 @@ function formatCapLimit(label: string, cap: number, size: number): string {
 
 function formatCapReduce(label: string, cap: number, size: number): string {
   return `${label} could not be reduced below ${formatMb(cap, 0)}MB (got ${formatMb(size)}MB)`;
+}
+
+function mediaSizeLimitError(message: string, cap: number, size: number): MediaSizeLimitError {
+  return new MediaSizeLimitError(message, { maxBytes: cap, actualBytes: size });
 }
 
 function isHeicSource(opts: { contentType?: string; fileName?: string }): boolean {
@@ -800,7 +817,11 @@ export async function optimizeImageBufferForWebMedia(params: {
   const cap = effectiveImageBytesCap(baseCap, params.imageCompression) ?? baseCap;
   if (params.contentType === "image/gif") {
     if (params.buffer.length > cap) {
-      throw new Error(formatCapLimit("GIF", cap, params.buffer.length));
+      throw mediaSizeLimitError(
+        formatCapLimit("GIF", cap, params.buffer.length),
+        cap,
+        params.buffer.length,
+      );
     }
     assertImageSatisfiesHardDimensionPolicy(params.buffer, params.imageCompression);
     return {
@@ -834,7 +855,11 @@ export async function optimizeImageBufferForWebMedia(params: {
   });
   logOptimizedImage({ originalSize: params.buffer.length, optimized });
   if (optimized.buffer.length > cap) {
-    throw new Error(formatCapReduce("Media", cap, optimized.buffer.length));
+    throw mediaSizeLimitError(
+      formatCapReduce("Media", cap, optimized.buffer.length),
+      cap,
+      optimized.buffer.length,
+    );
   }
   return {
     buffer: optimized.buffer,
@@ -897,7 +922,11 @@ async function loadWebMediaInternal(
     logOptimizedImage({ originalSize, optimized });
 
     if (optimized.buffer.length > cap) {
-      throw new Error(formatCapReduce("Media", cap, optimized.buffer.length));
+      throw mediaSizeLimitError(
+        formatCapReduce("Media", cap, optimized.buffer.length),
+        cap,
+        optimized.buffer.length,
+      );
     }
 
     const fileName =
@@ -927,7 +956,11 @@ async function loadWebMediaInternal(
       const isGif = params.contentType === "image/gif";
       if (isGif || !optimizeImages) {
         if (params.buffer.length > imageCap) {
-          throw new Error(formatCapLimit(isGif ? "GIF" : "Media", imageCap, params.buffer.length));
+          throw mediaSizeLimitError(
+            formatCapLimit(isGif ? "GIF" : "Media", imageCap, params.buffer.length),
+            imageCap,
+            params.buffer.length,
+          );
         }
         assertImageSatisfiesHardDimensionPolicy(params.buffer, imageCompression);
         return {
@@ -960,7 +993,11 @@ async function loadWebMediaInternal(
       };
     }
     if (params.buffer.length > cap) {
-      throw new Error(formatCapLimit("Media", cap, params.buffer.length));
+      throw mediaSizeLimitError(
+        formatCapLimit("Media", cap, params.buffer.length),
+        cap,
+        params.buffer.length,
+      );
     }
     return {
       buffer: params.buffer,

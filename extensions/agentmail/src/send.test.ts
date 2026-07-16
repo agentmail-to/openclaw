@@ -1,5 +1,6 @@
 import type { AgentMailClient } from "agentmail";
 import { describe, expect, it, vi } from "vitest";
+import { AgentMailMediaPolicyError } from "./media.js";
 import {
   normalizeAgentMailTarget,
   parseAgentMailMessageTarget,
@@ -24,7 +25,8 @@ const loadAgentMailOutboundAttachments = vi.hoisted(() =>
   ]),
 );
 
-vi.mock("./media.js", () => ({
+vi.mock("./media.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./media.js")>()),
   loadAgentMailOutboundAttachments,
 }));
 
@@ -195,6 +197,38 @@ describe("AgentMail reply-only outbound", () => {
     });
     expect(reply).not.toHaveBeenCalled();
     expect(loadAgentMailOutboundAttachments).not.toHaveBeenCalled();
+  });
+
+  it("fails unknown-send recovery closed for deterministic media policy errors", async () => {
+    reply.mockClear();
+    loadAgentMailOutboundAttachments.mockRejectedValueOnce(
+      new AgentMailMediaPolicyError(
+        "AgentMail outbound attachments exceed the configured aggregate media limit",
+      ),
+    );
+    const now = 10_000;
+
+    await expect(
+      reconcileAgentMailUnknownSend(
+        {
+          cfg: { channels: { agentmail: { apiKey: "key", inboxId: "inbox_1" } } },
+          queueId: "queue_1",
+          channel: "agentmail",
+          to: "message:msg_1",
+          accountId: "default",
+          enqueuedAt: now - 1_000,
+          retryCount: 1,
+          effectiveReplyToId: "msg_1",
+          payloads: [{ text: "Hello", mediaUrls: ["file:///oversized.bin"] }],
+        },
+        { client: { inboxes: { messages: { reply } } } as never, now: () => now },
+      ),
+    ).resolves.toEqual({
+      status: "unresolved",
+      error: "AgentMail outbound attachments exceed the configured aggregate media limit",
+      retryable: false,
+    });
+    expect(reply).not.toHaveBeenCalled();
   });
 
   it("refuses recovery when the persisted reply target differs", async () => {

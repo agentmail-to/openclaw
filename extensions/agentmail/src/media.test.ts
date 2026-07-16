@@ -1,4 +1,4 @@
-import { MediaFetchError } from "openclaw/plugin-sdk/web-media";
+import { MediaFetchError, MediaSizeLimitError } from "openclaw/plugin-sdk/web-media";
 import { describe, expect, it, vi } from "vitest";
 import {
   AgentMailMediaPolicyError,
@@ -162,5 +162,22 @@ describe("AgentMail inbound attachments", () => {
         maxBytes: 100,
       }),
     ).rejects.toThrow("second attachment failed");
+  });
+
+  it.each([
+    new MediaFetchError("max_bytes", "remote payload exceeds the configured bound"),
+    new MediaSizeLimitError("local payload exceeds the configured bound", {
+      maxBytes: 100,
+      actualBytes: 101,
+    }),
+  ])("classifies bounded outbound loader failures as policy errors", async (error) => {
+    loadOutboundMediaFromUrl.mockRejectedValueOnce(error);
+
+    await expect(
+      loadAgentMailOutboundAttachments({
+        mediaUrls: ["file:///oversized.bin"],
+        maxBytes: 100,
+      }),
+    ).rejects.toBeInstanceOf(AgentMailMediaPolicyError);
   });
 });

@@ -13,7 +13,6 @@ type DispatchParams = {
   abortSignal?: AbortSignal;
   retryDelay?: (attempt: number) => number;
   initialAttempts: number;
-  maxDispatchAttempts: number;
   dispatchCompleted?: boolean;
 };
 
@@ -30,8 +29,6 @@ type ActiveDispatch = {
 // Durable ids include account + inbox + message, so this also coordinates overlapping account
 // restarts that open separate journal facades over the same shared queue.
 const activeDispatches = new Map<string, ActiveDispatch>();
-
-export const AGENTMAIL_INGRESS_MAX_DISPATCH_ATTEMPTS = 12;
 
 function retryDelayMs(attempt: number): number {
   return computeBackoff({ initialMs: 1_000, maxMs: 30 * 60_000, factor: 2, jitter: 0.2 }, attempt);
@@ -56,7 +53,6 @@ export async function processAgentMailIngress(params: {
   dispatch: AgentMailIngressDispatch;
   abortSignal?: AbortSignal;
   retryDelayMs?: (attempt: number) => number;
-  maxDispatchAttempts?: number;
 }): Promise<"accepted" | "duplicate"> {
   const id = createAgentMailDurableInboundId(params.record);
   const accepted = await params.journal.accept(id, params.record, {
@@ -76,7 +72,6 @@ export async function processAgentMailIngress(params: {
     abortSignal: params.abortSignal,
     retryDelay: params.retryDelayMs,
     initialAttempts: accepted.kind === "pending" ? accepted.record.attempts : 0,
-    maxDispatchAttempts: params.maxDispatchAttempts ?? AGENTMAIL_INGRESS_MAX_DISPATCH_ATTEMPTS,
   });
   return "accepted";
 }
@@ -104,36 +99,6 @@ function scheduleAgentMailIngressDispatch(params: DispatchParams): void {
     }
   };
   void active.task.then(finish, () => finish(false));
-}
-
-async function failAgentMailIngressUntilSettled(params: {
-  journal: AgentMailJournal;
-  id: string;
-  lastError: string;
-  abortSignal?: AbortSignal;
-  retryDelay: (attempt: number) => number;
-  attempts: number;
-}): Promise<boolean> {
-  const fail = params.journal.fail;
-  if (!fail) {
-    throw new Error("AgentMail durable ingress requires terminal-failure journal support");
-  }
-  let markerAttempts = params.attempts;
-  while (!params.abortSignal?.aborted) {
-    try {
-      await fail(params.id, {
-        reason: "dispatch_attempts_exhausted",
-        message: params.lastError,
-      });
-      return true;
-    } catch {
-      markerAttempts += 1;
-      if (!(await waitForRetry(params.abortSignal, params.retryDelay(markerAttempts)))) {
-        return false;
-      }
-    }
-  }
-  return false;
 }
 
 async function dispatchAgentMailIngressUntilSettled(params: DispatchParams): Promise<boolean> {
@@ -166,18 +131,6 @@ async function dispatchAgentMailIngressUntilSettled(params: DispatchParams): Pro
         }
         attempts += 1;
         const lastError = errorText(error);
-        if (attempts >= params.maxDispatchAttempts) {
-          // Stop poison work from refreshing its pending TTL forever. The failed tombstone keeps
-          // transport redelivery deduplicated while freeing admission capacity for later mail.
-          return await failAgentMailIngressUntilSettled({
-            journal: params.journal,
-            id: params.id,
-            lastError,
-            abortSignal: params.abortSignal,
-            retryDelay: params.retryDelay ?? retryDelayMs,
-            attempts,
-          });
-        }
         while (!params.abortSignal?.aborted) {
           try {
             const released = await params.journal.release(params.id, { lastError });
@@ -235,7 +188,6 @@ export async function replayPendingAgentMailIngress(params: {
   dispatch: AgentMailIngressDispatch;
   abortSignal?: AbortSignal;
   retryDelayMs?: (attempt: number) => number;
-  maxDispatchAttempts?: number;
 }): Promise<void> {
   for (const pending of await params.journal.pending()) {
     scheduleAgentMailIngressDispatch({
@@ -246,7 +198,6 @@ export async function replayPendingAgentMailIngress(params: {
       abortSignal: params.abortSignal,
       retryDelay: params.retryDelayMs,
       initialAttempts: pending.attempts,
-      maxDispatchAttempts: params.maxDispatchAttempts ?? AGENTMAIL_INGRESS_MAX_DISPATCH_ATTEMPTS,
     });
   }
 }

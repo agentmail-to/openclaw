@@ -4,6 +4,7 @@
 export {
   getDefaultLocalRoots,
   LocalMediaAccessError,
+  MediaSizeLimitError,
   loadWebMedia,
   loadWebMediaRaw,
   optimizeImageToJpeg,

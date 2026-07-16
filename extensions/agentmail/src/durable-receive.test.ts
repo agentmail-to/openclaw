@@ -142,31 +142,32 @@ describe("AgentMail durable ingress", () => {
     expect(dispatch).toHaveBeenCalledTimes(2);
   });
 
-  it("terminally fails poison ingress after the bounded dispatch budget", async () => {
+  it("keeps accepted ingress retryable beyond the former dispatch budget", async () => {
     const release = vi.fn(async () => true);
-    const fail = vi.fn(async () => true);
+    let attempts = 0;
     const dispatch = vi.fn(async () => {
-      throw new Error("deterministic dispatch failure");
+      attempts += 1;
+      if (attempts <= 12) {
+        throw new Error("temporary dispatch failure");
+      }
     });
+    const complete = vi.fn(async () => undefined);
     await processAgentMailIngress({
       journal: {
         accept: async () => ({ kind: "accepted", duplicate: false, record: {} }),
-        complete: vi.fn(),
+        complete,
         release,
-        fail,
       } as never,
       record,
       dispatch,
       retryDelayMs: () => 0,
-      maxDispatchAttempts: 2,
     });
 
-    await vi.waitFor(() => expect(fail).toHaveBeenCalledOnce());
-    expect(dispatch).toHaveBeenCalledTimes(2);
-    expect(release).toHaveBeenCalledOnce();
-    expect(fail).toHaveBeenCalledWith(createAgentMailDurableInboundId(record), {
-      reason: "dispatch_attempts_exhausted",
-      message: "deterministic dispatch failure",
+    await vi.waitFor(() => expect(complete).toHaveBeenCalledOnce());
+    expect(dispatch).toHaveBeenCalledTimes(13);
+    expect(release).toHaveBeenCalledTimes(12);
+    expect(release).toHaveBeenLastCalledWith(createAgentMailDurableInboundId(record), {
+      lastError: "temporary dispatch failure",
     });
   });
 
@@ -329,7 +330,9 @@ describe("AgentMail durable ingress", () => {
       retryDelayMs: () => 0,
     });
     await vi.waitFor(() => expect(dispatch).toHaveBeenCalledOnce());
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => {
+      setTimeout(resolve, 0);
+    });
     expect(dispatch).toHaveBeenCalledOnce();
     expect(complete).not.toHaveBeenCalled();
   });

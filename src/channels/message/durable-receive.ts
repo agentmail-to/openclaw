@@ -60,13 +60,6 @@ type DurableInboundReceiveReleaseOptions = {
   releasedAt?: number;
 };
 
-/** Options recorded when terminally failing an inbound event. */
-type DurableInboundReceiveFailOptions = {
-  reason: string;
-  message?: string;
-  failedAt?: number;
-};
-
 /** Durable receive journal facade used by channel receive pipelines. */
 type DurableInboundReceiveJournal<TPayload, TMetadata, TCompletedMetadata> = {
   accept(
@@ -80,8 +73,6 @@ type DurableInboundReceiveJournal<TPayload, TMetadata, TCompletedMetadata> = {
     options?: DurableInboundReceiveCompleteOptions<TCompletedMetadata>,
   ): Promise<void>;
   release(id: string, options?: DurableInboundReceiveReleaseOptions): Promise<boolean>;
-  /** Optional terminal-failure support; queue-backed journals provide it. */
-  fail?(id: string, options: DurableInboundReceiveFailOptions): Promise<boolean>;
   deletePending(id: string): Promise<boolean>;
 };
 
@@ -153,8 +144,8 @@ export function createDurableInboundReceiveJournalFromQueue<
       if (result.kind === "pending" || result.kind === "claimed") {
         return { kind: "pending", duplicate: true, record: result.record };
       }
-      // Failed queue rows are terminal tombstones. Treat redelivery as completed so callers do
-      // not recreate poison work while the failed-retention window is active.
+      // Queue failures represent terminal corruption or an owner-level fail decision. Replaying
+      // caller payload over that tombstone cannot atomically replace it and may duplicate work.
       return {
         kind: "completed",
         duplicate: true,
@@ -186,11 +177,6 @@ export function createDurableInboundReceiveJournalFromQueue<
       });
       await prune(normalizeDurableInboundReceiveId(id));
       return released;
-    },
-    fail: async (id, failOptions) => {
-      const failed = await options.queue.fail(normalizeDurableInboundReceiveId(id), failOptions);
-      await prune(normalizeDurableInboundReceiveId(id));
-      return failed;
     },
     deletePending: async (id) => {
       const deleted = await options.queue.delete(normalizeDurableInboundReceiveId(id));

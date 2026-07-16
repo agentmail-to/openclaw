@@ -243,8 +243,9 @@ export function readPluginSdkSurfaceBudgets(env = process.env) {
       // +32: shared channel setup, config-schema, policy, and status helpers.
       // +2: shared channel replay-guard factory and claim handle.
       // +2: MediaFetchError and its code let external plugins classify bounded-media rejection.
+      // +1: MediaSizeLimitError distinguishes permanent loaded-media policy failures.
       // Harvest: retired AudioConfig type -1.
-      7987,
+      7988,
       env,
     ),
     publicFunctionExports: readPluginSdkSurfaceBudgetEnv(

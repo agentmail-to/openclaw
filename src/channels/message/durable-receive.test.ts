@@ -153,15 +153,14 @@ describe("createDurableInboundReceiveJournalFromQueue", () => {
       });
       const journal = createDurableInboundReceiveJournalFromQueue({ queue });
 
-      await journal.accept("message-1", { body: "poison" });
+      await queue.enqueue("message-1", { body: "poison" });
       await expect(
-        journal.fail("message-1", {
-          reason: "dispatch_attempts_exhausted",
+        queue.fail("message-1", {
+          reason: "corrupt_payload",
           message: "bad payload",
           failedAt: 20,
         }),
       ).resolves.toBe(true);
-      await expect(journal.pending()).resolves.toEqual([]);
       await expect(journal.accept("message-1", { body: "again" })).resolves.toMatchObject({
         kind: "completed",
         duplicate: true,
